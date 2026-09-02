@@ -1,0 +1,41 @@
+school: Example University
+college: School of Computer Science
+start_urls:
+  - https://www.example.edu/faculty/index.html
+
+# Profiles are restricted to these domains; links outside them are ignored.
+allowed_domains:
+  - www.example.edu
+
+discovery:
+  link_selectors:
+    - ".faculty-list a[href]"
+  include_patterns:
+    - "/faculty/[^/]+\\.html$"
+  exclude_patterns: []
+
+selectors:
+  name: ["h1.profile-name", "h1"]
+  category: [".profile-category"]
+  title: [".profile-title", ".position"]
+  email: ["a[href^='mailto:']", ".email"]
+  phone: ["a[href^='tel:']", ".phone"]
+  department: [".department", ".affiliation"]
+  research: [".research-interests li", ".research-interests"]
+  admission_info: [".admission-info", ".student-recruitment"]
+  sections:
+    education: ["#education", ".education"]
+    experience: ["#experience", ".experience"]
+    publications: ["#publications", ".publications"]
+  body: ["main .profile-content", "article"]
+  photo: [".profile-photo img", "main img"]
+
+request:
+  delay_seconds: 1.0
+  timeout_seconds: 30
+  retries: 3
+  user_agent: TeacherResearchCrawler/1.0 contact@example.com
+  verify_ssl: true
+
+# Relative paths are resolved from this YAML file.
+output_dir: ../output

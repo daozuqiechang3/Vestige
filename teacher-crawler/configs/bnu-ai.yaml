@@ -1,0 +1,25 @@
+school: 北京师范大学
+college: 人工智能学院
+
+start_urls:
+  - https://ai.bnu.edu.cn/zszl/yjszs/pyds/sssds/a3ebbdaf77b6446e8e017a5fdbc32b58.htm
+
+allowed_domains:
+  - ai.bnu.edu.cn
+
+discovery:
+  teacher_link_selector: ".gpTable a[href*='/xygk/szdw/']"
+  url_patterns:
+    - "/xygk/szdw/"
+
+profile:
+  container: ".section-right"
+  name: ".subPageTit h3"
+  summary: ".tj-intro"
+  content: ".tj-intro"
+  photo: ".tj-intro img"
+
+request:
+  delay_seconds: 1.5
+  timeout_seconds: 30
+  use_browser: false

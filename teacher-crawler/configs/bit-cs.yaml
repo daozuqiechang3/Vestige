@@ -1,0 +1,30 @@
+school: 北京理工大学
+college: 计算机学院
+
+start_urls:
+  - https://cs.bit.edu.cn/szdw/jsml/index.htm
+
+allowed_domains:
+  - cs.bit.edu.cn
+
+discovery:
+  teacher_link_selector: ".sub_033a a.item"
+  url_patterns:
+    - "/szdw/jsml/bssds/"
+    - "/szdw/jsml/sssds/"
+
+profile:
+  container: ".sub_034"
+  name: ".left .title"
+  category_from_url:
+    bssds: 博士生导师
+    sssds: 硕士生导师
+  department: ".left .vicetitle"
+  summary: ".left .summary"
+  content: ".right.article"
+  photo: ".left .img_box img"
+
+request:
+  delay_seconds: 1.5
+  timeout_seconds: 30
+  use_browser: false

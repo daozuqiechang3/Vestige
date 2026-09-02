@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>教师信息采集</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18212b;
+      --muted: #687481;
+      --bg: #FFFDF9;
+      --primary: #F0DFE6;
+      --accent: #E3DAEA;
+      --line: #E3DAEA;
+      --soft: #F0DFE6;
+      --white: #ffffff;
+      --danger: #a43a3a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+    button, input, select, textarea { font: inherit; letter-spacing: 0; }
+    header {
+      background: var(--accent);
+      color: var(--ink);
+      border-bottom: 4px solid var(--primary);
+    }
+    .header-inner, main { width: 100%; margin-left: 0; margin-right: 0; }
+    .header-inner { min-height: 72px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    h1 { margin: 0; font-size: 22px; font-weight: 700; }
+    main { margin-top: 16px; margin-bottom: 40px; background: var(--bg); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    section { padding: 22px 24px; border-bottom: 1px solid var(--line); }
+    section:last-child { border-bottom: 0; }
+    h2 { margin: 0 0 16px; font-size: 16px; }
+    .task-form { display: grid; grid-template-columns: minmax(280px, 1fr) 130px auto; gap: 12px; align-items: end; }
+    label { display: grid; gap: 7px; color: var(--ink); font-weight: 600; }
+    input, select, textarea {
+      height: 40px;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 0 11px;
+      color: var(--ink);
+      background: var(--white);
+      outline: none;
+    }
+    textarea { height: 62px; padding: 7px 9px; resize: vertical; }
+    input:focus, select:focus, textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary); }
+    button, .download-link {
+      min-height: 40px;
+      border: 1px solid var(--primary);
+      border-radius: 4px;
+      padding: 9px 15px;
+      background: var(--primary);
+      color: var(--ink);
+      text-decoration: none;
+      cursor: pointer;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    button:hover, .download-link:hover { background: var(--accent); border-color: var(--accent); }
+    button:disabled { border-color: var(--accent); background: var(--accent); color: var(--muted); cursor: not-allowed; }
+    .status-line { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+    .status-badge { display: inline-flex; align-items: center; min-height: 26px; padding: 3px 9px; border-radius: 3px; background: var(--soft); color: var(--ink); font-weight: 700; }
+    .status-badge.running { background: var(--primary); color: var(--ink); }
+    .status-badge.completed { background: var(--accent); color: var(--ink); }
+    .status-badge.failed { background: var(--primary); color: var(--danger); }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); }
+    .metric { min-height: 74px; padding: 13px 16px; border-right: 1px solid var(--line); }
+    .metric:last-child { border-right: 0; }
+    .metric span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .metric strong { font-size: 22px; font-variant-numeric: tabular-nums; }
+    .progress-track { height: 8px; margin-top: 14px; overflow: hidden; background: var(--accent); border-radius: 3px; }
+    .progress-bar { height: 100%; width: 0; background: var(--primary); transition: width 220ms ease; }
+    .log-panel { height: 190px; overflow: auto; margin: 0; padding: 14px; background: var(--primary); color: var(--ink); border-radius: 4px; font-family: Consolas, "Microsoft YaHei", monospace; font-size: 12px; line-height: 1.65; white-space: pre-wrap; }
+    .results-head { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-bottom: 14px; }
+    .results-head h2 { margin: 0; }
+    .download-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .filters { display: grid; grid-template-columns: 1.5fr repeat(3, minmax(130px, .7fr)) auto; gap: 10px; align-items: end; margin-bottom: 14px; }
+    .checks { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+    .checks label { display: inline-flex; grid: none; align-items: center; gap: 6px; font-weight: 500; }
+    .checks input, .favorite-input { width: 16px; height: 16px; }
+    .result-count { color: var(--muted); margin-bottom: 10px; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); }
+    table { width: 100%; min-width: 1380px; border-collapse: collapse; }
+    th, td { padding: 11px 13px; text-align: left; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); color: var(--ink); font-size: 12px; }
+    tr:last-child td { border-bottom: 0; }
+    td a { color: var(--ink); text-decoration-color: var(--accent); }
+    .row-download { display: inline-block; color: var(--ink); text-decoration-color: var(--accent); font-weight: 600; text-decoration: none; }
+    .teacher-name { font-weight: 700; margin-bottom: 5px; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .clip { max-width: 330px; line-height: 1.55; }
+    .signal { display: inline-block; margin: 0 4px 4px 0; padding: 2px 6px; background: var(--soft); border-radius: 3px; font-size: 12px; }
+    .save-button { min-height: 32px; padding: 5px 10px; margin-top: 6px; }
+    .failure-table { min-width: 760px; }
+    .failure-table th:last-child, .failure-table td:last-child { width: 120px; }
+    .failure-url { overflow-wrap: anywhere; }
+    .failure-error { color: var(--danger); font-size: 12px; line-height: 1.5; }
+    .retry-button { min-height: 34px; padding: 6px 12px; }
+    .empty { padding: 28px; text-align: center; color: var(--muted); }
+    .error { margin-top: 12px; color: var(--danger); font-weight: 600; }
+    [hidden] { display: none !important; }
+    @media (max-width: 720px) {
+      .header-inner { min-height: 64px; align-items: flex-start; justify-content: center; flex-direction: column; gap: 3px; padding: 12px 0; }
+      .header-inner { padding: 12px 14px; }
+      main { width: 100%; margin-top: 8px; }
+      section { padding: 18px 14px; }
+      .task-form { grid-template-columns: 1fr; }
+      .metrics { grid-template-columns: repeat(2, 1fr); }
+      .metric:nth-child(2) { border-right: 0; }
+      .metric:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .results-head { align-items: stretch; flex-direction: column; }
+      .download-actions { display: grid; }
+      .filters { grid-template-columns: 1fr; }
+      .download-link { text-align: center; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <h1>教师信息采集</h1>
+    </div>
+  </header>
+  <main>
+    <section>
+      <form id="task-form" class="task-form">
+        <label>教师列表页 URL
+          <input id="url" type="url" required value="https://cs.bit.edu.cn/szdw/jsml/index.htm" autocomplete="url">
+        </label>
+        <label>采集上限
+          <input id="limit" type="number" min="1" max="500" value="2" required>
+        </label>
+        <button id="start" type="submit">启动采集任务</button>
+      </form>
+      <div id="form-error" class="error" role="alert" hidden></div>
+    </section>
+
+    <section id="progress-section">
+      <div class="status-line">
+        <h2>任务进度</h2>
+        <span id="status" class="status-badge">等待任务</span>
+      </div>
+      <div class="metrics">
+        <div class="metric"><span>发现</span><strong id="discovered">0</strong></div>
+        <div class="metric"><span>成功</span><strong id="processed">0</strong></div>
+        <div class="metric"><span>失败</span><strong id="failed">0</strong></div>
+        <div class="metric"><span>跳过 / 重复</span><strong id="skipped">0</strong></div>
+      </div>
+      <div class="progress-track" aria-label="任务完成进度">
+        <div id="progress" class="progress-bar"></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>运行日志</h2>
+      <pre id="logs" class="log-panel" aria-live="polite">尚未启动任务。</pre>
+    </section>
+
+    <section id="failure-section" hidden>
+      <div class="results-head">
+        <h2>失败教师</h2>
+        <button id="retry-all" type="button">全部重试失败项</button>
+      </div>
+      <div class="table-wrap">
+        <table class="failure-table">
+          <thead><tr><th>教师名称</th><th>原始详情页 URL</th><th>失败原因</th><th>操作</th></tr></thead>
+          <tbody id="failure-results"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="results-head">
+        <h2>导师筛选</h2>
+        <div class="download-actions">
+          <a id="csv-download" class="download-link" href="#" hidden>下载 teachers.csv</a>
+          <a id="zip-download" class="download-link" href="#" hidden>下载全部文件 ZIP</a>
+        </div>
+      </div>
+      <form id="filter-form" class="filters">
+        <label>搜索姓名、方向、实验室、招生原文
+          <input id="query" type="search" placeholder="例如：大模型、实习生">
+        </label>
+        <label>招生类型
+          <select id="recruit-type">
+            <option value="">全部</option>
+            <option value="internship">实习</option>
+            <option value="graduate">硕博 / 推免</option>
+            <option value="contact">欢迎联系</option>
+          </select>
+        </label>
+        <label>联系状态
+          <select id="contact-filter">
+            <option value="">全部</option><option>未联系</option><option>待联系</option>
+            <option>已发邮件</option><option>已回复</option><option>暂不考虑</option>
+          </select>
+        </label>
+        <label>排序
+          <select id="sort">
+            <option value="recruit_score:desc">招生信号优先</option>
+            <option value="name:asc">姓名升序</option>
+            <option value="title:asc">职称升序</option>
+            <option value="research_dir:asc">研究方向升序</option>
+          </select>
+        </label>
+        <button type="submit">应用筛选</button>
+      </form>
+      <div class="checks">
+        <label><input id="has-recruit" type="checkbox"> 仅有招生信息</label>
+        <label><input id="has-email" type="checkbox"> 仅有邮箱</label>
+        <label><input id="favorite-filter" type="checkbox"> 仅收藏</label>
+      </div>
+      <div id="result-count" class="result-count">任务完成后可筛选教师</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>收藏</th><th>教师 / 职称</th><th>研究方向 / 实验室</th><th>邮箱</th><th>招生信号</th><th>联系状态 / 备注</th><th>来源 / 文件</th></tr></thead>
+          <tbody id="results"><tr><td class="empty" colspan="7">任务完成后显示教师列表</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script>
+    const form = document.querySelector('#task-form');
+    const startButton = document.querySelector('#start');
+    const errorBox = document.querySelector('#form-error');
+    const statusBadge = document.querySelector('#status');
+    const logs = document.querySelector('#logs');
+    const results = document.querySelector('#results');
+    const zipDownload = document.querySelector('#zip-download');
+    const csvDownload = document.querySelector('#csv-download');
+    const filterForm = document.querySelector('#filter-form');
+    const resultCount = document.querySelector('#result-count');
+    const failureSection = document.querySelector('#failure-section');
+    const failureResults = document.querySelector('#failure-results');
+    const retryAllButton = document.querySelector('#retry-all');
+    let pollTimer = null;
+    let currentTaskId = null;
+
+    const labels = {
+      queued: '等待执行',
+      running: '正在采集',
+      retrying: '正在重试',
+      completed: '采集完成',
+      failed: '任务失败'
+    };
+
+    function setError(message) {
+      errorBox.textContent = message || '';
+      errorBox.hidden = !message;
+    }
+
+    function showEmpty(message) {
+      results.replaceChildren();
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 7;
+      cell.className = 'empty';
+      cell.textContent = message;
+      row.append(cell);
+      results.append(row);
+    }
+
+    function addText(parent, text, className = '') {
+      const node = document.createElement('div');
+      node.textContent = text || '';
+      if (className) node.className = className;
+      parent.append(node);
+      return node;
+    }
+
+    function renderFailures(failures, busy = false) {
+      failureResults.replaceChildren();
+      failureSection.hidden = failures.length === 0;
+      retryAllButton.disabled = busy;
+      failures.forEach((failure) => {
+        const row = document.createElement('tr');
+        const nameCell = document.createElement('td');
+        addText(nameCell, failure.name || '教师姓名未识别', 'teacher-name');
+
+        const urlCell = document.createElement('td');
+        const link = document.createElement('a');
+        link.href = failure.profile_url;
+        link.target = '_blank';
+        link.rel = 'noreferrer';
+        link.className = 'failure-url';
+        link.textContent = failure.profile_url;
+        urlCell.append(link);
+
+        const errorCell = document.createElement('td');
+        addText(errorCell, failure.error || '未知错误', 'failure-error');
+
+        const actionCell = document.createElement('td');
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'retry-button';
+        retry.textContent = '重试';
+        retry.disabled = busy;
+        retry.addEventListener('click', () => retryFailures(failure.profile_url));
+        actionCell.append(retry);
+        row.append(nameCell, urlCell, errorCell, actionCell);
+        failureResults.append(row);
+      });
+    }
+
+    function startPolling(taskId) {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(() => poll(taskId), 1000);
+    }
+
+    async function retryFailures(profileUrl = null) {
+      if (!currentTaskId) return;
+      setError('');
+      retryAllButton.disabled = true;
+      failureResults.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+      startButton.disabled = true;
+      try {
+        const url = profileUrl
+          ? `/api/tasks/${currentTaskId}/failures/retry`
+          : `/api/tasks/${currentTaskId}/failures/retry-all`;
+        const options = {method: 'POST', headers: {'Content-Type': 'application/json'}};
+        if (profileUrl) options.body = JSON.stringify({profile_url: profileUrl});
+        const response = await fetch(url, options);
+        const task = await response.json();
+        if (!response.ok) throw new Error(task.detail || '重试任务创建失败');
+        renderTask(task);
+        startPolling(task.id);
+        await poll(task.id);
+      } catch (error) {
+        setError(error.message);
+        startButton.disabled = false;
+        await poll(currentTaskId);
+      }
+    }
+
+    async function loadResearch(taskId) {
+      const params = new URLSearchParams();
+      const query = document.querySelector('#query').value.trim();
+      const recruitType = document.querySelector('#recruit-type').value;
+      const contactStatus = document.querySelector('#contact-filter').value;
+      const [sort, order] = document.querySelector('#sort').value.split(':');
+      if (query) params.set('q', query);
+      if (recruitType) params.set('recruit_type', recruitType);
+      if (contactStatus) params.set('contact_status', contactStatus);
+      if (document.querySelector('#has-recruit').checked) params.set('has_recruit_info', 'true');
+      if (document.querySelector('#has-email').checked) params.set('has_email', 'true');
+      if (document.querySelector('#favorite-filter').checked) params.set('favorite', 'true');
+      params.set('sort', sort);
+      params.set('order', order);
+      const response = await fetch(`/api/tasks/${taskId}/research?${params}`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || '无法读取结构化教师数据');
+      renderResearch(payload.teachers);
+      resultCount.textContent = `共 ${payload.count} 位教师`;
+    }
+
+    function renderResearch(teachers) {
+      results.replaceChildren();
+      if (!teachers.length) {
+        showEmpty('没有符合当前筛选条件的教师');
+        return;
+      }
+      teachers.forEach((teacher) => {
+        const row = document.createElement('tr');
+
+        const favoriteCell = document.createElement('td');
+        const favorite = document.createElement('input');
+        favorite.type = 'checkbox';
+        favorite.className = 'favorite-input';
+        favorite.checked = teacher.favorite;
+        favorite.setAttribute('aria-label', `收藏 ${teacher.name}`);
+        favoriteCell.append(favorite);
+
+        const identityCell = document.createElement('td');
+        addText(identityCell, teacher.name, 'teacher-name');
+        addText(identityCell, teacher.title || '职称未提取', 'muted');
+
+        const researchCell = document.createElement('td');
+        addText(researchCell, teacher.research_dir || '研究方向未提取', 'clip');
+        if (teacher.lab) addText(researchCell, `实验室：${teacher.lab}`, 'muted clip');
+
+        const emailCell = document.createElement('td');
+        if (teacher.email) {
+          const email = document.createElement('a');
+          email.href = `mailto:${teacher.email}`;
+          email.textContent = teacher.email;
+          emailCell.append(email);
+        } else {
+          addText(emailCell, '未提取', 'muted');
+        }
+
+        const signalCell = document.createElement('td');
+        const labels = {internship: '实习', graduate: '硕博 / 推免', contact: '欢迎联系'};
+        teacher.recruit_types.forEach((type) => {
+          const tag = document.createElement('span');
+          tag.className = 'signal';
+          tag.textContent = labels[type] || type;
+          signalCell.append(tag);
+        });
+        addText(signalCell, teacher.recruit_text || '未命中招生话术', 'clip');
+
+        const manualCell = document.createElement('td');
+        const contact = document.createElement('select');
+        ['未联系', '待联系', '已发邮件', '已回复', '暂不考虑'].forEach((value) => {
+          const option = document.createElement('option');
+          option.value = value;
+          option.textContent = value;
+          option.selected = value === teacher.contact_status;
+          contact.append(option);
+        });
+        const note = document.createElement('textarea');
+        note.value = teacher.note;
+        note.placeholder = '匹配度、邮件和回复情况';
+        const save = document.createElement('button');
+        save.type = 'button';
+        save.className = 'save-button';
+        save.textContent = '保存标记';
+        save.addEventListener('click', async () => {
+          save.disabled = true;
+          try {
+            const response = await fetch(`/api/tasks/${currentTaskId}/research/${teacher.id}`, {
+              method: 'PATCH',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({note: note.value, contact_status: contact.value, favorite: favorite.checked})
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.detail || '保存失败');
+            save.textContent = '已保存';
+            setTimeout(() => { save.textContent = '保存标记'; }, 1200);
+          } catch (error) {
+            setError(error.message);
+          } finally {
+            save.disabled = false;
+          }
+        });
+        manualCell.append(contact, note, save);
+
+        const sourceCell = document.createElement('td');
+        const homepage = document.createElement('a');
+        homepage.href = teacher.homepage_url;
+        homepage.target = '_blank';
+        homepage.rel = 'noreferrer';
+        homepage.textContent = '原始主页';
+        sourceCell.append(homepage);
+        if (teacher.download_url) {
+          const word = document.createElement('a');
+          word.href = teacher.download_url;
+          word.className = 'row-download';
+          word.textContent = '下载 Word';
+          sourceCell.append(document.createElement('br'), word);
+        }
+
+        row.append(favoriteCell, identityCell, researchCell, emailCell, signalCell, manualCell, sourceCell);
+        results.append(row);
+      });
+    }
+
+    function renderTask(task) {
+      currentTaskId = task.id;
+      document.querySelector('#url').value = task.url;
+      if (task.limit) document.querySelector('#limit').value = task.limit;
+      statusBadge.textContent = labels[task.status] || task.status;
+      statusBadge.className = `status-badge ${task.status}`;
+      document.querySelector('#discovered').textContent = task.counts.discovered;
+      document.querySelector('#processed').textContent = task.counts.processed;
+      document.querySelector('#failed').textContent = task.counts.failed;
+      document.querySelector('#skipped').textContent = task.counts.skipped + task.counts.duplicates;
+      document.querySelector('#progress').style.width = `${task.progress}%`;
+      logs.textContent = task.logs.length ? task.logs.join('\n') : '任务正在初始化。';
+      logs.scrollTop = logs.scrollHeight;
+      setError(task.error || '');
+      const busy = task.status === 'running' || task.status === 'queued' || task.status === 'retrying';
+      startButton.disabled = busy;
+      renderFailures(task.failures || [], busy);
+
+      if (task.status !== 'completed') showEmpty('采集完成后显示结构化教师数据');
+      if (task.zip_url) {
+        zipDownload.href = task.zip_url;
+        zipDownload.hidden = false;
+      } else {
+        zipDownload.hidden = true;
+      }
+      if (task.csv_url) {
+        csvDownload.href = task.csv_url;
+        csvDownload.hidden = false;
+      } else {
+        csvDownload.hidden = true;
+      }
+    }
+
+    async function poll(taskId) {
+      try {
+        const response = await fetch(`/api/tasks/${taskId}`);
+        const task = await response.json();
+        if (!response.ok) {
+          if (response.status === 404) {
+            localStorage.removeItem('teacherCrawlerTaskId');
+            currentTaskId = null;
+            renderFailures([]);
+            setError('');
+            clearInterval(pollTimer);
+            pollTimer = null;
+            startButton.disabled = false;
+            return;
+          }
+          throw new Error(task.detail || '无法读取任务状态');
+        }
+        renderTask(task);
+        if (task.status === 'completed' || task.status === 'failed') {
+          clearInterval(pollTimer);
+          pollTimer = null;
+          startButton.disabled = false;
+          if (task.status === 'completed') await loadResearch(task.id);
+        }
+      } catch (error) {
+        setError(error.message);
+        clearInterval(pollTimer);
+        pollTimer = null;
+        startButton.disabled = false;
+      }
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      setError('');
+      startButton.disabled = true;
+      zipDownload.hidden = true;
+      csvDownload.hidden = true;
+      try {
+        const response = await fetch('/api/tasks', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            url: document.querySelector('#url').value.trim(),
+            limit: Number(document.querySelector('#limit').value)
+          })
+        });
+        const task = await response.json();
+        if (!response.ok) throw new Error(task.detail || '任务创建失败');
+        localStorage.setItem('teacherCrawlerTaskId', task.id);
+        renderTask(task);
+        startPolling(task.id);
+        await poll(task.id);
+      } catch (error) {
+        setError(error.message);
+        startButton.disabled = false;
+      }
+    });
+
+    filterForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!currentTaskId) return;
+      try {
+        await loadResearch(currentTaskId);
+      } catch (error) {
+        setError(error.message);
+      }
+    });
+
+    retryAllButton.addEventListener('click', () => retryFailures());
+
+    const savedTaskId = localStorage.getItem('teacherCrawlerTaskId');
+    if (savedTaskId) {
+      startButton.disabled = true;
+      poll(savedTaskId);
+      startPolling(savedTaskId);
+    }
+  </script>
+</body>
+</html>

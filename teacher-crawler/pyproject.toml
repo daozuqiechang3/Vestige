@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "teacher-crawler"
+version = "0.1.0"
+description = "Configuration-driven crawler for static faculty websites"
+requires-python = ">=3.10"
+dependencies = [
+  "beautifulsoup4>=4.12,<5",
+  "fastapi>=0.115,<1",
+  "httpx>=0.27,<1",
+  "lxml>=5,<7",
+  "Pillow>=10,<13",
+  "pydantic>=2.7,<3",
+  "python-docx>=1.1,<2",
+  "PyYAML>=6,<7",
+  "tenacity>=8,<10",
+  "trafilatura>=1.12,<3",
+  "uvicorn>=0.30,<1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+teacher-crawler = "crawler.main:main"
+teacher-crawler-web = "crawler.web:main"
+
+[tool.setuptools.packages.find]
+include = ["crawler*"]
+
+[tool.setuptools.package-data]
+crawler = ["static/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

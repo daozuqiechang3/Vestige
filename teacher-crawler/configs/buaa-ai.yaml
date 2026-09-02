@@ -1,0 +1,25 @@
+school: 北京航空航天大学
+college: 人工智能学院
+
+start_urls:
+  - https://iai.buaa.edu.cn/szdw/ayjsdsjs.htm
+
+allowed_domains:
+  - iai.buaa.edu.cn
+
+discovery:
+  teacher_link_selector: ".listpeople a[href*='/info/1013/']"
+  url_patterns:
+    - "/info/1013/"
+
+profile:
+  container: ".listpeople"
+  name: ".titbox p:first-child"
+  summary: ".titbox"
+  content: "#vsb_content_2"
+  photo: ".titbox img"
+
+request:
+  delay_seconds: 1.5
+  timeout_seconds: 30
+  use_browser: false
