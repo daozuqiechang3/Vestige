@@ -89,6 +89,50 @@ def test_cli_accepts_positive_limit() -> None:
     assert args.limit == 2
 
 
+def test_limit_counts_only_successful_profiles(tmp_path: Path, monkeypatch: object) -> None:
+    import crawler.main as main_module
+
+    profiles = [
+        DiscoveredProfile("Broken", "https://example.edu/broken"),
+        DiscoveredProfile("Alice", "https://example.edu/alice"),
+        DiscoveredProfile("Bob", "https://example.edu/bob"),
+    ]
+
+    class FirstFailsFetcher(FakeFetcher):
+        fetched_urls: list[str] = []
+
+        def fetch(self, url: str, use_cache: bool = True) -> FetchResult:
+            type(self).fetched_urls.append(url)
+            if url.endswith("/broken"):
+                raise RuntimeError("broken profile")
+            return super().fetch(url, use_cache=use_cache)
+
+    monkeypatch.setattr(main_module, "Fetcher", FirstFailsFetcher)  # type: ignore[attr-defined]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        main_module, "discover_profiles", lambda _config, _fetcher: profiles
+    )
+    config = SchoolConfig.model_validate(
+        {
+            "school": "Test University",
+            "college": "School of Engineering",
+            "base_url": "https://example.edu",
+            "directory_urls": ["/people"],
+            "output_dir": tmp_path / "success-limit-output",
+        }
+    )
+    events: list[str] = []
+
+    counts = run(config, limit=1, progress_callback=lambda event, _data: events.append(event))
+
+    assert counts["processed"] == 1
+    assert counts["failed"] == 1
+    assert FirstFailsFetcher.fetched_urls == [
+        "https://example.edu/broken",
+        "https://example.edu/alice",
+    ]
+    assert events[-1] == "paused"
+
+
 def test_failed_profile_is_exported_and_can_be_retried(
     tmp_path: Path, monkeypatch: object
 ) -> None:

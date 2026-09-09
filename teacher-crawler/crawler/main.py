@@ -62,8 +62,10 @@ def _process_profiles(
     progress_callback: ProgressCallback | None = None,
     force_refresh: bool = False,
     fetcher: Fetcher | None = None,
-) -> dict[str, int]:
+    success_limit: int | None = None,
+) -> tuple[dict[str, int], bool]:
     counts = {"processed": 0, "duplicates": 0, "failed": 0}
+    reached_limit = False
     owns_fetcher = fetcher is None
     if fetcher is None:
         fetcher = Fetcher(config.request, config.allowed_domains, storage.cache_dir)
@@ -125,6 +127,9 @@ def _process_profiles(
                     url=record.profile_url,
                     counts=dict(counts),
                 )
+                if success_limit is not None and counts["processed"] >= success_limit:
+                    reached_limit = True
+                    break
             except Exception as exc:
                 LOGGER.exception("Failed to process %s", profile.url)
                 storage.state.failed[profile.url] = f"{type(exc).__name__}: {exc}"
@@ -143,7 +148,7 @@ def _process_profiles(
         if owns_fetcher:
             fetcher.close()
     _export_outputs(storage)
-    return counts
+    return counts, reached_limit
 
 
 def retry_failed_profiles(
@@ -159,13 +164,14 @@ def retry_failed_profiles(
     requested_urls = {profile.url for profile in profiles}
     if not requested_urls or not requested_urls.issubset(failed_urls):
         raise ValueError("retry targets must be current failed profiles")
-    return _process_profiles(
+    counts, _ = _process_profiles(
         config,
         profiles,
         storage,
         progress_callback=progress_callback,
         force_refresh=True,
     )
+    return counts
 
 
 def run(
@@ -180,6 +186,8 @@ def run(
         raise ValueError("limit must be at least 1")
     storage = Storage(config.output_dir, reset_state=not resume)
     counts = {"discovered": 0, "processed": 0, "skipped": 0, "duplicates": 0, "failed": 0}
+    existing_successes = len(storage.state.completed) if resume else 0
+    counts["processed"] = existing_successes
 
     with Fetcher(config.request, config.allowed_domains, storage.cache_dir) as fetcher:
         profiles = discover_profiles(config, fetcher)
@@ -187,7 +195,6 @@ def run(
         LOGGER.info("Discovered %s profile URLs", len(profiles))
         _emit(progress_callback, "discovered", count=len(profiles), counts=dict(counts))
 
-        attempted = 0
         pending: list[DiscoveredProfile] = []
         for profile in profiles:
             if resume and profile.url in storage.state.completed:
@@ -196,20 +203,27 @@ def run(
             if resume and profile.url in storage.state.duplicates:
                 counts["skipped"] += 1
                 continue
-            if limit is not None and attempted >= limit:
-                break
-            attempted += 1
             pending.append(profile)
 
-        processed = _process_profiles(
-            config,
-            pending,
-            storage,
-            progress_callback=progress_callback,
-            fetcher=fetcher,
-        )
-    counts.update(processed)
-    _emit(progress_callback, "completed", counts=dict(counts))
+        if limit is not None and existing_successes >= limit:
+            processed = {"processed": 0, "duplicates": 0, "failed": 0}
+            reached_limit = True
+        else:
+            processed, reached_limit = _process_profiles(
+                config,
+                pending,
+                storage,
+                progress_callback=progress_callback,
+                fetcher=fetcher,
+                success_limit=(limit - existing_successes) if limit is not None else None,
+            )
+    counts["processed"] += processed["processed"]
+    counts["duplicates"] = processed["duplicates"]
+    counts["failed"] = processed["failed"]
+    if reached_limit:
+        _emit(progress_callback, "paused", counts=dict(counts))
+    else:
+        _emit(progress_callback, "completed", counts=dict(counts))
     return counts
 
 

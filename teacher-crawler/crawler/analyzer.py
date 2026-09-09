@@ -95,12 +95,11 @@ def analyze_teacher(teacher: Teacher, html_path: Path) -> TeacherResearch:
     lab = _find_section(teacher, ("实验室", "研究中心", "课题组", "团队"))
     if not lab:
         lab_match = LAB_PATTERN.search(combined_text)
-        lab = (
-            f"{_clean(re.sub(r'^(?:所属|所在)\s*', '', lab_match.group(1)))} / "
-            f"{_clean(lab_match.group(2))}"
-            if lab_match
-            else ""
-        )
+        if lab_match:
+            lab_name = _clean(re.sub(r"^(?:所属|所在)\s*", "", lab_match.group(1)))
+            lab = f"{lab_name} / {_clean(lab_match.group(2))}"
+        else:
+            lab = ""
 
     bio = _find_section(teacher, ("个人简介", "个人信息", "简介", "教育经历"))
     if not bio:
