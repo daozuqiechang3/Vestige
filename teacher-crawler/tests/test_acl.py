@@ -5,9 +5,11 @@ import pytest
 
 from crawler.acl import (
     TRANSLATE_CHUNK_SIZE,
+    canonical_paper_url,
     discover_papers,
     extract_paper,
     is_paper_url,
+    paper_id_from_url,
     translate_abstract,
     translate_text,
     validate_volume_url,
@@ -69,8 +71,12 @@ def test_acl_accepts_volume_and_individual_paper_urls() -> None:
 
     assert validate_volume_url(volume_url) == volume_url
     assert validate_volume_url(paper_url) == paper_url
-    assert validate_volume_url(paper_url.rstrip("/")) == paper_url.rstrip("/")
+    assert validate_volume_url(paper_url.rstrip("/")) == paper_url
     assert is_paper_url(paper_url)
+    assert is_paper_url("https://aclanthology.org/P19-1014/")
+    assert canonical_paper_url("http://aclanthology.org/P19-1014?source=test") == (
+        "https://aclanthology.org/P19-1014/"
+    )
     assert not is_paper_url(volume_url)
 
 
@@ -78,7 +84,9 @@ def test_acl_volume_discovery_excludes_front_matter_entry() -> None:
     html = """
     <a href="/2026.acl-long.0/">Volume front matter</a>
     <a href="/2026.acl-long.1/">First paper</a>
+    <a href="/2026.acl-long.1?duplicate=yes">Duplicate form</a>
     <a href="/2026.acl-long.2/">Second paper</a>
+    <a href="/2026.acl-short.1/">Another volume</a>
     """
 
     assert discover_papers(
@@ -89,9 +97,144 @@ def test_acl_volume_discovery_excludes_front_matter_entry() -> None:
     ]
 
 
+def test_acl_legacy_volume_discovery_excludes_front_matter() -> None:
+    html = """
+    <a href="/P19-1000/">Volume front matter</a>
+    <a href="/P19-1001/">First paper</a>
+    <a href="/P19-1002/">Second paper</a>
+    <a href="/P19-2001/">Different volume</a>
+    """
+
+    assert discover_papers(html, "https://aclanthology.org/volumes/P19-1/") == [
+        "https://aclanthology.org/P19-1001/",
+        "https://aclanthology.org/P19-1002/",
+    ]
+
+
 def test_acl_rejects_unrelated_anthology_pages() -> None:
-    with pytest.raises(ValueError, match="文集卷页面或单篇论文页面"):
+    with pytest.raises(ValueError, match="论文模式只接受"):
         validate_volume_url("https://aclanthology.org/people/pan-lu/")
+
+
+def test_acm_normalizes_session_and_paper_urls() -> None:
+    session = "https://dl.acm.org/doi/proceedings/10.5555/3776572#heading2"
+    paper = "https://dl.acm.org/doi/10.65109/HQQZ1937"
+
+    assert validate_volume_url(session) == (
+        "https://dl.acm.org/doi/proceedings/10.5555/3776572?tocHeading=heading2"
+    )
+    assert validate_volume_url(paper) == paper
+    assert canonical_paper_url(paper + "?download=true") == paper
+    assert paper_id_from_url(paper) == "10.65109_HQQZ1937"
+    assert is_paper_url(paper)
+    assert not is_paper_url("https://dl.acm.org/doi/abs/10.65109/HQQZ1937")
+    with pytest.raises(ValueError, match="必须指定 SESSION 分组"):
+        validate_volume_url(
+            "https://dl.acm.org/doi/proceedings/10.5555/3776572"
+        )
+
+
+def test_acm_discovers_only_papers_in_selected_session() -> None:
+    html = """
+    <div class="toc__section">
+      <a id="heading1">SESSION: Keynote</a>
+      <div><div class="issue-item"><h3 class="issue-item__title">
+        <a href="/doi/10.65109/OTHER1">Other paper</a>
+      </h3></div></div>
+    </div>
+    <div class="toc__section">
+      <a id="heading2">SESSION: Research Paper Track</a>
+      <div>
+        <div class="issue-item"><h3 class="issue-item__title">
+          <a href="/doi/10.65109/HQQZ1937">The Multi-Agent Off-Switch Game</a>
+        </h3></div>
+        <div class="issue-item"><h3 class="issue-item__title">
+          <a href="/doi/10.65109/HQQZ1937?duplicate=true">Duplicate</a>
+        </h3></div>
+      </div>
+    </div>
+    """
+
+    assert discover_papers(
+        html,
+        "https://dl.acm.org/doi/proceedings/10.5555/3776572?tocHeading=heading2",
+    ) == ["https://dl.acm.org/doi/10.65109/HQQZ1937"]
+
+
+def test_acm_discovers_all_flat_siblings_until_next_session() -> None:
+    html = """
+    <div class="toc__section">
+      <h2 id="heading2">SESSION: Research Paper Track</h2>
+      <div><div class="issue-item"><h3 class="issue-item__title">
+        <a href="/doi/10.65109/ONE1">First paper</a>
+      </h3></div></div>
+      <div><div class="issue-item"><h3 class="issue-item__title">
+        <a href="/doi/10.65109/TWO2">Second paper</a>
+      </h3></div></div>
+      <div><div class="issue-item"><h3 class="issue-item__title">
+        <a href="/doi/10.65109/THREE3">Third paper</a>
+      </h3></div></div>
+      <h2 id="heading3">SESSION: Extended Abstracts</h2>
+      <div><div class="issue-item"><h3 class="issue-item__title">
+        <a href="/doi/10.65109/OTHER4">Other session paper</a>
+      </h3></div></div>
+    </div>
+    """
+
+    assert discover_papers(
+        html,
+        "https://dl.acm.org/doi/proceedings/10.5555/3776572?tocHeading=heading2",
+    ) == [
+        "https://dl.acm.org/doi/10.65109/ONE1",
+        "https://dl.acm.org/doi/10.65109/TWO2",
+        "https://dl.acm.org/doi/10.65109/THREE3",
+    ]
+
+
+def test_acm_extracts_title_authors_abstract_and_pdf(monkeypatch) -> None:
+    monkeypatch.setattr("crawler.acl.translate_text", lambda text: f"翻译:{text}")
+    monkeypatch.setattr("crawler.acl.translate_abstract", lambda text: f"翻译:{text}")
+    abstract = (
+        "The off-switch game framework has been instrumental in understanding "
+        "corrigibility -- the property that AI agents should allow human oversight "
+        "and intervention."
+    )
+    html = f"""
+    <meta name="publication_doi" content="10.65109/HQQZ1937">
+    <main>
+      <h1 property="name">The Multi-Agent Off-Switch Game</h1>
+      <div class="contributors"><span role="list">
+        <span property="author" typeof="Person" role="listitem">
+          <span property="givenName">Akash</span>
+          <span property="familyName">Agrawal</span>
+        </span>
+        <span property="author" typeof="Person" role="listitem">
+          <span property="givenName">Soroush</span>
+          <span property="familyName">Ebadian</span>
+        </span>
+        <span property="author" typeof="Person" role="listitem">
+          <span property="givenName">Lewis</span>
+          <span property="familyName">Hammond</span>
+        </span>
+      </span></div>
+      <section id="abstract" property="abstract">
+        <h2>Abstract</h2><div role="paragraph">{abstract}</div>
+      </section>
+      <a href="/doi/pdf/10.65109/HQQZ1937?download=true">Download PDF</a>
+    </main>
+    """
+
+    paper = extract_paper(html, "https://dl.acm.org/doi/10.65109/HQQZ1937")
+
+    assert paper.title == "The Multi-Agent Off-Switch Game"
+    assert paper.title_zh == "翻译:The Multi-Agent Off-Switch Game"
+    assert paper.authors == ["Akash Agrawal", "Soroush Ebadian", "Lewis Hammond"]
+    assert paper.abstract_en == abstract
+    assert paper.abstract_zh == f"翻译:{abstract}"
+    assert paper.pdf_url == (
+        "https://dl.acm.org/doi/pdf/10.65109/HQQZ1937?download=true"
+    )
+    assert paper.parser_mode == "ACM 专用解析"
 
 
 def test_acl_uses_no_abstract_only_when_missing(monkeypatch) -> None:
@@ -147,8 +290,34 @@ def test_acl_translation_failure_reuses_english_and_logs_reason(monkeypatch) -> 
     assert "ReadTimeout: timed out" in paper.translation_error
     assert logs[0] == "准备翻译标题，文本长度：5"
     assert logs[1] == "准备翻译摘要，文本长度：26"
-    assert logs[2] == "英文摘要：Complete English abstract."
-    assert logs[3].endswith("执行降级，中文摘要复用英文原文")
+    assert len(logs) == 3
+    assert logs[2].endswith("执行降级，中文摘要复用英文原文")
+
+
+def test_acl_uses_citation_metadata_and_extracts_authors(monkeypatch) -> None:
+    monkeypatch.setattr("crawler.acl.translate_text", lambda text: f"翻译:{text}")
+    html = """
+    <meta property="og:url" content="https://aclanthology.org/2026.acl-long.1/">
+    <meta name="citation_title" content="Metadata Title">
+    <meta name="citation_author" content="Alice Example">
+    <meta name="citation_author" content="Bob Example">
+    <meta name="citation_pdf_url" content="https://aclanthology.org/2026.acl-long.1.pdf">
+    <h2 id="title">Fallback Title</h2>
+    """
+
+    paper = extract_paper(html, "https://aclanthology.org/2026.acl-long.1")
+
+    assert paper.title == "Metadata Title"
+    assert paper.authors == ["Alice Example", "Bob Example"]
+    assert paper.pdf_url == "https://aclanthology.org/2026.acl-long.1.pdf"
+
+
+def test_acl_rejects_generic_success_page_without_paper_metadata() -> None:
+    with pytest.raises(ValueError, match="缺少 ACL Anthology 论文元数据"):
+        extract_paper(
+            "<html><title>Just a moment...</title><h1>Please wait</h1></html>",
+            "https://aclanthology.org/2026.acl-long.1/",
+        )
 
 
 def test_title_translation_failure_does_not_block_abstract(monkeypatch) -> None:
