@@ -21,6 +21,9 @@ from .nllb import get_nllb_translator
 
 ACL_DOMAIN = "aclanthology.org"
 ACM_DOMAIN = "dl.acm.org"
+OPENREVIEW_DOMAIN = "openreview.net"
+OPENREVIEW_FORUM_PATH = "/forum"
+OPENREVIEW_GROUP_PATH = "/group"
 ACL_PAPER_PATH_RE = re.compile(
     r"/(?:\d{4}\.[A-Za-z0-9-]+\.\d+|[A-Za-z]\d{2}-\d+)/?"
 )
@@ -57,6 +60,22 @@ class Paper:
     title_translation_failed: bool = False
     title_translation_error: str = ""
     authors: list[str] = field(default_factory=list)
+    # OpenReview exposes richer structured metadata than ACL/ACM.  These
+    # fields are optional so existing ACL/ACM records and positional callers
+    # remain fully compatible.
+    author_profiles: list[dict[str, str]] = field(default_factory=list)
+    original_pdf_url: str = ""
+    source: str = ""
+    venue: str = ""
+    decision: str = ""
+    decision_comment: str = ""
+    tldr: str = ""
+    lay_summary: str = ""
+    primary_area: str = ""
+    keywords: list[str] = field(default_factory=list)
+    submission_number: str = ""
+    published_at: str = ""
+    modified_at: str = ""
     collected_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -76,6 +95,12 @@ def canonical_paper_url(url: str) -> str:
     match = ACM_PAPER_PATH_RE.fullmatch(parsed.path)
     if parsed.hostname == ACM_DOMAIN and match:
         return f"https://{ACM_DOMAIN}/doi/{match.group(1)}"
+    if parsed.hostname in {OPENREVIEW_DOMAIN, f"www.{OPENREVIEW_DOMAIN}"} and parsed.path.rstrip(
+        "/"
+    ) == OPENREVIEW_FORUM_PATH:
+        forum_id = parse_qs(parsed.query).get("id", [""])[0].strip()
+        if forum_id and re.fullmatch(r"[A-Za-z0-9_-]{6,128}", forum_id):
+            return f"https://{OPENREVIEW_DOMAIN}{OPENREVIEW_FORUM_PATH}?id={forum_id}"
     raise ValueError("不是有效的 ACL Anthology 或 ACM Digital Library 论文 URL")
 
 
@@ -84,6 +109,9 @@ def paper_id_from_url(url: str) -> str:
     parsed = urlparse(canonical)
     if parsed.hostname == ACM_DOMAIN:
         return parsed.path.removeprefix("/doi/").replace("/", "_")
+    if parsed.hostname == OPENREVIEW_DOMAIN:
+        forum_id = parse_qs(parsed.query).get("id", [""])[0]
+        return f"openreview_{forum_id}"
     return parsed.path.strip("/")
 
 
@@ -129,7 +157,20 @@ def validate_volume_url(url: str) -> str:
             )
         path = parsed.path.rstrip("/")
         return f"https://{ACM_DOMAIN}{path}?{urlencode({'tocHeading': heading})}"
-    raise ValueError("论文模式只接受 ACL 文集卷/论文页或 ACM 分组/论文页")
+    if parsed.hostname in {OPENREVIEW_DOMAIN, f"www.{OPENREVIEW_DOMAIN}"} and parsed.path.rstrip(
+        "/"
+    ) == OPENREVIEW_GROUP_PATH:
+        group_id = parse_qs(parsed.query).get("id", [""])[0].strip()
+        tab = parsed.fragment.strip()
+        if not group_id or not group_id.startswith("ICML.cc/"):
+            raise ValueError("OpenReview 分组 URL 缺少有效的 group id")
+        if not tab or not re.fullmatch(r"tab-[A-Za-z0-9_-]+", tab):
+            raise ValueError("OpenReview 分组 URL 必须指定 tab，例如 #tab-accept-spotlight")
+        query = urlencode({"id": group_id})
+        return f"https://{OPENREVIEW_DOMAIN}{OPENREVIEW_GROUP_PATH}?{query}{('#' + tab) if tab else ''}"
+    raise ValueError(
+        "论文模式只接受 ACL 文集卷/论文页、ACM 分组/论文页或 OpenReview 分组/论文页"
+    )
 
 
 def is_paper_url(url: str) -> bool:
@@ -140,6 +181,15 @@ def is_paper_url(url: str) -> bool:
     ) or (
         parsed.hostname == ACM_DOMAIN
         and ACM_PAPER_PATH_RE.fullmatch(parsed.path) is not None
+    ) or (
+        parsed.hostname in {OPENREVIEW_DOMAIN, f"www.{OPENREVIEW_DOMAIN}"}
+        and parsed.path.rstrip("/") == OPENREVIEW_FORUM_PATH
+        and bool(
+            parse_qs(parsed.query).get("id", [""])[0]
+            and re.fullmatch(
+                r"[A-Za-z0-9_-]{6,128}", parse_qs(parsed.query).get("id", [""])[0]
+            )
+        )
     )
 
 
@@ -582,6 +632,9 @@ def write_csv(destination: Path, papers: list[dict[str, object]]) -> Path:
     handle, temporary = tempfile.mkstemp(dir=destination.parent, prefix=".papers.", text=True)
     try:
         with os.fdopen(handle, "w", encoding="utf-8-sig", newline="") as stream:
+            # Keep the original 15 columns in the same order.  Downstream
+            # spreadsheets and scripts often address these columns by index;
+            # OpenReview metadata is therefore appended instead of inserted.
             fields = [
                 "title",
                 "title_zh",
@@ -598,6 +651,21 @@ def write_csv(destination: Path, papers: list[dict[str, object]]) -> Path:
                 "title_translation_failed",
                 "title_translation_error",
                 "collected_at",
+                # Extended metadata (OpenReview and richer ACM records).
+                "title_en",
+                "author_profiles",
+                "original_pdf_url",
+                "source",
+                "venue",
+                "decision",
+                "decision_comment",
+                "tldr",
+                "lay_summary",
+                "primary_area",
+                "keywords",
+                "submission_number",
+                "published_at",
+                "modified_at",
             ]
             writer = csv.DictWriter(stream, fieldnames=fields)
             writer.writeheader()
@@ -606,6 +674,17 @@ def write_csv(destination: Path, papers: list[dict[str, object]]) -> Path:
                 authors = row.get("authors")
                 if isinstance(authors, list):
                     row["authors"] = "; ".join(str(author) for author in authors)
+                profiles = row.get("author_profiles")
+                if isinstance(profiles, list):
+                    row["author_profiles"] = "; ".join(
+                        str(item.get("url") or item.get("id") or item.get("name") or item)
+                        if isinstance(item, dict)
+                        else str(item)
+                        for item in profiles
+                    )
+                keywords = row.get("keywords")
+                if isinstance(keywords, list):
+                    row["keywords"] = "; ".join(str(keyword) for keyword in keywords)
                 writer.writerow(row)
         os.replace(temporary, destination)
     except BaseException:

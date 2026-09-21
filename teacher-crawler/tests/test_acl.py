@@ -1,3 +1,4 @@
+import csv
 from pathlib import Path
 
 import httpx
@@ -446,3 +447,43 @@ def test_csv_keeps_complete_fallback_and_manual_abstracts(tmp_path: Path) -> Non
 
     assert english in exported
     assert manual_zh in exported
+
+
+def test_csv_keeps_original_columns_before_extended_metadata(tmp_path: Path) -> None:
+    destination = write_csv(tmp_path / "papers.csv", [])
+    with destination.open(encoding="utf-8-sig", newline="") as stream:
+        header = next(csv.reader(stream))
+
+    assert header[:15] == [
+        "title",
+        "title_zh",
+        "authors",
+        "pdf_url",
+        "abstract_en",
+        "abstract_zh",
+        "url",
+        "status",
+        "error",
+        "parser_mode",
+        "translation_failed",
+        "translation_error",
+        "title_translation_failed",
+        "title_translation_error",
+        "collected_at",
+    ]
+    assert header[15:] == [
+        "title_en",
+        "author_profiles",
+        "original_pdf_url",
+        "source",
+        "venue",
+        "decision",
+        "decision_comment",
+        "tldr",
+        "lay_summary",
+        "primary_area",
+        "keywords",
+        "submission_number",
+        "published_at",
+        "modified_at",
+    ]

@@ -33,6 +33,15 @@ from .acl import (
 )
 from .config import SchoolConfig, load_school_config
 from .discovery import DiscoveredProfile
+from .openreview import (
+    OpenReviewChallengeError,
+    OpenReviewError,
+    collection_from_url,
+    discover_from_html,
+    is_openreview_forum_url,
+    make_openreview_client,
+    parse_forum_html,
+)
 from .repository import TeacherRepository
 from .storage import Storage, safe_filename_part, teacher_stem
 
@@ -40,6 +49,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "configs"
 TASKS_DIR = Path(os.environ.get("CRAWLER_TASKS_DIR", ROOT / "output" / "web-tasks"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+PAPER_MODES = {"acl", "openreview"}
 
 
 class CrawlRequest(BaseModel):
@@ -70,16 +80,35 @@ class PaperUpdate(BaseModel):
 class BrowserDiscoveryRequest(BaseModel):
     conference: str = Field(min_length=1, max_length=200)
     session: str = Field(min_length=1, max_length=200)
-    paper_urls: list[str] = Field(min_length=1, max_length=5000)
+    paper_urls: list[str] = Field(default_factory=list, max_length=5000)
+    # A browser can submit the rendered group page directly.  ``html_pages``
+    # supports the 22 OpenReview pagination pages without requiring a second
+    # parser in the UI.
+    html: str = Field(default="", max_length=3_000_000)
+    page_url: str = Field(default="", max_length=2000)
+    html_pages: list[str] = Field(default_factory=list, max_length=30)
     limit: int | None = Field(default=None, ge=1, le=5000, strict=True)
 
 
 class BrowserPaperSnapshot(BaseModel):
     url: str
-    title: str = Field(min_length=1, max_length=10000)
+    title: str = Field(default="", max_length=10000)
+    html: str = Field(default="", max_length=3_000_000)
     authors: list[str] = Field(default_factory=list, max_length=500)
     abstract_en: str = ""
     pdf_url: str = ""
+    original_pdf_url: str = ""
+    author_profiles: list[dict[str, str]] = Field(default_factory=list, max_length=500)
+    venue: str = ""
+    decision: str = ""
+    decision_comment: str = ""
+    tldr: str = ""
+    lay_summary: str = ""
+    primary_area: str = ""
+    keywords: list[str] = Field(default_factory=list, max_length=500)
+    submission_number: str = ""
+    published_at: str = ""
+    modified_at: str = ""
 
 
 class BrowserPapersRequest(BaseModel):
@@ -139,7 +168,7 @@ class TaskManager:
                 task = TaskRecord(**raw)
                 if task.status in {"running", "retrying"}:
                     task.status = "queued"
-                if task.mode == "acl":
+                if task.mode in PAPER_MODES:
                     task.papers = self._load_papers(task, embedded_papers)
                     self._normalize_acl_task(task)
                     for paper in task.papers:
@@ -156,7 +185,7 @@ class TaskManager:
         task.output_dir.mkdir(parents=True, exist_ok=True)
         payload = asdict(task)
         payload["output_dir"] = "."
-        if task.mode == "acl":
+        if task.mode in PAPER_MODES:
             payload["papers"] = []
         temp = task.output_dir / ".task.json.tmp"
         temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -337,7 +366,13 @@ class TaskManager:
 
     def create(self, request: CrawlRequest) -> TaskRecord:
         url = request.url.strip()
-        if request.mode == "acl":
+        mode = request.mode
+        if mode == "acl" and urlparse(url).hostname in {
+            "openreview.net",
+            "www.openreview.net",
+        }:
+            mode = "openreview"
+        if mode == "acl":
             url = validate_volume_url(url)
             source = (
                 "ACM Digital Library"
@@ -345,33 +380,63 @@ class TaskManager:
                 else "ACL Anthology"
             )
             school = college = source
-        elif request.mode == "teacher":
+        elif mode == "openreview":
+            if is_openreview_forum_url(url):
+                url = canonical_paper_url(url)
+                school, college = "OpenReview", "OpenReview 论文"
+            else:
+                collection = collection_from_url(url)
+                url = collection.url
+                group_parts = collection.group_id.split("/")
+                conference = (
+                    f"{group_parts[0].split('.')[0]} {group_parts[1]}"
+                    if len(group_parts) >= 2
+                    else "OpenReview"
+                )
+                school, college = conference, collection.venue
+        elif mode == "teacher":
             config = self.teacher_config(url)
             url, school, college = config.start_urls[0], config.school, config.college
         else:
             raise ValueError("未知采集模式")
-        if request.mode == "acl" and urlparse(url).hostname == "dl.acm.org":
+        if (
+            mode in PAPER_MODES
+            and urlparse(url).hostname in {"dl.acm.org", "openreview.net"}
+        ):
             with self.lock:
                 reusable = next(
                     (
                         item
                         for item in self.tasks.values()
-                        if item.mode == "acl"
+                        if item.mode == mode
                         and item.url == url
-                        and item.counts.get("processed", 0) > 0
-                        and item.status in {"completed", "completed_with_errors", "paused"}
+                        and (
+                            item.counts.get("processed", 0) > 0
+                            or item.status == "awaiting_browser"
+                        )
+                        and item.status
+                        in {
+                            "completed",
+                            "completed_with_errors",
+                            "paused",
+                            "awaiting_browser",
+                        }
                     ),
                     None,
                 )
                 if reusable is not None:
                     self._append_log(
                         reusable,
-                        "检测到相同 ACM SESSION，复用已有采集结果；"
-                        "如需补采请在原任务中继续",
+                        (
+                            "检测到相同 ACM SESSION，复用已有采集结果；"
+                            if mode == "acl"
+                            else "检测到相同 OpenReview 分组，复用已有采集结果；"
+                        )
+                        + "如需补采请在原任务中继续",
                     )
                     self.save(reusable)
                     return reusable
-        task = TaskRecord(uuid.uuid4().hex, url, request.mode, school, college, request.limit)
+        task = TaskRecord(uuid.uuid4().hex, url, mode, school, college, request.limit)
         task.output_dir = TASKS_DIR / task.id
         with self.lock:
             self.tasks[task.id] = task
@@ -384,29 +449,59 @@ class TaskManager:
         task_id: str,
         request: BrowserDiscoveryRequest,
     ) -> TaskRecord:
-        """Apply a complete ACM SESSION discovery captured in a verified browser."""
+        """Apply complete paper discovery captured in a verified browser."""
         with self.lock:
             task = self.get(task_id)
-            if task.mode != "acl" or urlparse(task.url).hostname != "dl.acm.org":
-                raise ValueError("当前任务不是 ACM 论文任务")
+            if task.mode not in PAPER_MODES:
+                raise ValueError("当前任务不是论文任务")
+            if task.mode == "acl" and urlparse(task.url).hostname != "dl.acm.org":
+                raise ValueError("当前任务不是 ACM 或 OpenReview 浏览器导入任务")
+            expected_domain = (
+                "openreview.net" if task.mode == "openreview" else "dl.acm.org"
+            )
             if task.status in {"queued", "running", "retrying"}:
                 raise ValueError("任务正在执行，不能同时导入浏览器发现结果")
 
+            raw_values = list(request.paper_urls)
+            if request.html or request.html_pages:
+                if task.mode != "openreview":
+                    raise ValueError("HTML 发现导入目前只支持 OpenReview")
+                page_url = request.page_url.strip() or task.url
+                html_values = ([request.html] if request.html else []) + list(
+                    request.html_pages
+                )
+                for html in html_values:
+                    refs = discover_from_html(html, page_url)
+                    raw_values.extend(ref.url for ref in refs)
+
             urls: list[str] = []
-            for value in request.paper_urls:
+            for value in raw_values:
                 url = canonical_paper_url(value)
-                if urlparse(url).hostname != "dl.acm.org":
-                    raise ValueError("浏览器发现结果包含非 ACM 论文 URL")
+                if urlparse(url).hostname != expected_domain:
+                    raise ValueError("浏览器发现结果包含其他来源的论文 URL")
                 if url not in urls:
                     urls.append(url)
             if not urls:
-                raise ValueError("浏览器发现结果没有有效论文")
+                raise ValueError("浏览器发现结果没有有效论文；请提供论文 URL 或页面 HTML")
 
             existing_successes = {
                 str(paper.get("url"))
                 for paper in task.papers
                 if paper.get("url")
             }
+            # OpenReview's rendered group is paginated (ICML spotlight has
+            # more than twenty pages).  A browser may therefore send one
+            # page at a time.  Keep already discovered URLs and append new
+            # ones instead of silently shrinking the task to the latest page.
+            # ACM's SESSION importer historically receives one complete
+            # section and intentionally keeps its replacement semantics.
+            if task.mode == "openreview":
+                merged_urls = list(task.paper_urls)
+                for url in urls:
+                    if url not in merged_urls:
+                        merged_urls.append(url)
+                urls = merged_urls
+
             missing = existing_successes.difference(urls)
             if missing:
                 raise ValueError("浏览器发现结果缺少任务中已有的成功论文")
@@ -446,11 +541,16 @@ class TaskManager:
         task_id: str,
         request: BrowserPapersRequest,
     ) -> TaskRecord:
-        """Merge paper metadata read from ACM detail pages in a verified browser."""
+        """Merge paper metadata read from detail pages in a verified browser."""
         with self.lock:
             task = self.get(task_id)
-            if task.mode != "acl" or urlparse(task.url).hostname != "dl.acm.org":
-                raise ValueError("当前任务不是 ACM 论文任务")
+            if task.mode not in PAPER_MODES:
+                raise ValueError("当前任务不是论文任务")
+            if task.mode == "acl" and urlparse(task.url).hostname != "dl.acm.org":
+                raise ValueError("当前任务不是 ACM 或 OpenReview 浏览器导入任务")
+            expected_domain = (
+                "openreview.net" if task.mode == "openreview" else "dl.acm.org"
+            )
             if task.status in {"queued", "running", "retrying"}:
                 raise ValueError("任务正在执行，不能同时导入浏览器论文快照")
             known_urls = set(task.paper_urls)
@@ -461,6 +561,36 @@ class TaskManager:
                 url = canonical_paper_url(snapshot.url)
                 if url not in known_urls:
                     raise ValueError(f"论文不属于当前 SESSION：{url}")
+                if snapshot.html:
+                    collection = None
+                    if task.mode == "openreview" and not is_openreview_forum_url(task.url):
+                        collection = collection_from_url(task.url)
+                    parsed = parse_forum_html(
+                        snapshot.html,
+                        url,
+                        collection=collection,
+                    )
+                    snapshot = BrowserPaperSnapshot(
+                        url=url,
+                        title=parsed.title,
+                        authors=parsed.authors,
+                        abstract_en=parsed.abstract_en,
+                        pdf_url=parsed.pdf_url,
+                        original_pdf_url=parsed.original_pdf_url,
+                        author_profiles=parsed.author_profiles,
+                        venue=parsed.venue,
+                        decision=parsed.decision,
+                        decision_comment=parsed.decision_comment,
+                        tldr=parsed.tldr,
+                        lay_summary=parsed.lay_summary,
+                        primary_area=parsed.primary_area,
+                        keywords=parsed.keywords,
+                        submission_number=parsed.submission_number,
+                        published_at=parsed.published_at,
+                        modified_at=parsed.modified_at,
+                    )
+                if not snapshot.title.strip():
+                    raise ValueError(f"浏览器论文快照缺少标题：{url}")
                 normalized.append((url, snapshot))
             prospective = set(by_url).union(url for url, _ in normalized)
             if task.limit is not None and len(prospective) > task.limit:
@@ -468,21 +598,61 @@ class TaskManager:
             if request.complete and prospective != known_urls:
                 raise ValueError("仍有待采集论文，不能标记浏览器采集完成")
 
+            # Build and validate the complete batch before changing task state.
+            # This prevents a malformed later snapshot from leaving an earlier
+            # snapshot marked successful after the request has failed.
+            prepared_by_url = dict(by_url)
+            prepared_states = dict(task.paper_states)
+            prepared_errors = dict(task.paper_errors)
+            raw_html: dict[str, str] = {}
             for url, snapshot in normalized:
                 existing = by_url.get(url, {})
-                abstract = snapshot.abstract_en.strip() or "无摘要"
+                def existing_text(field: str, value: str) -> str:
+                    return value.strip() or str(existing.get(field) or "")
+
+                abstract = existing_text("abstract_en", snapshot.abstract_en) or "无摘要"
                 pdf_url = snapshot.pdf_url.strip()
-                if pdf_url and urlparse(pdf_url).hostname != "dl.acm.org":
-                    raise ValueError(f"论文 PDF 不是 ACM URL：{url}")
+                if pdf_url and urlparse(pdf_url).hostname not in {
+                    expected_domain,
+                    f"www.{expected_domain}",
+                }:
+                    raise ValueError(f"论文 PDF 与任务来源不一致：{url}")
+                original_pdf_url = snapshot.original_pdf_url.strip()
+                if original_pdf_url and urlparse(original_pdf_url).hostname not in {
+                    expected_domain,
+                    f"www.{expected_domain}",
+                }:
+                    raise ValueError(f"论文原始 PDF 与任务来源不一致：{url}")
                 untranslated = not existing
+                is_openreview = task.mode == "openreview"
+                authors = [name.strip() for name in snapshot.authors if name.strip()]
+                if not authors and isinstance(existing.get("authors"), list):
+                    authors = [str(name) for name in existing["authors"] if str(name).strip()]
+                author_profiles = [
+                    {str(key): str(value) for key, value in item.items()}
+                    for item in snapshot.author_profiles
+                ]
+                if not author_profiles and isinstance(existing.get("author_profiles"), list):
+                    author_profiles = [
+                        {str(key): str(value) for key, value in item.items()}
+                        for item in existing["author_profiles"]
+                        if isinstance(item, dict)
+                    ]
+                keywords = [value.strip() for value in snapshot.keywords if value.strip()]
+                if not keywords and isinstance(existing.get("keywords"), list):
+                    keywords = [str(value) for value in existing["keywords"] if str(value).strip()]
                 paper = Paper(
                     title=snapshot.title.strip(),
                     title_zh=str(existing.get("title_zh") or snapshot.title.strip()),
-                    pdf_url=pdf_url,
+                    pdf_url=pdf_url or str(existing.get("pdf_url") or ""),
                     abstract_en=abstract,
                     abstract_zh=str(existing.get("abstract_zh") or abstract),
                     url=url,
-                    parser_mode="ACM 专用解析（浏览器快照）",
+                    parser_mode=(
+                        "OpenReview 浏览器快照"
+                        if is_openreview
+                        else "ACM 专用解析（浏览器快照）"
+                    ),
                     favorite=bool(existing.get("favorite", False)),
                     translation_failed=(
                         untranslated and abstract != "无摘要"
@@ -504,14 +674,43 @@ class TaskManager:
                         if untranslated
                         else str(existing.get("title_translation_error", ""))
                     ),
-                    authors=[name.strip() for name in snapshot.authors if name.strip()],
+                    authors=authors,
+                    author_profiles=author_profiles,
+                    original_pdf_url=original_pdf_url
+                    or str(existing.get("original_pdf_url") or ""),
+                    source="OpenReview" if is_openreview else "ACM Digital Library",
+                    venue=existing_text("venue", snapshot.venue),
+                    decision=existing_text("decision", snapshot.decision),
+                    decision_comment=existing_text("decision_comment", snapshot.decision_comment),
+                    tldr=existing_text("tldr", snapshot.tldr),
+                    lay_summary=existing_text("lay_summary", snapshot.lay_summary),
+                    primary_area=existing_text("primary_area", snapshot.primary_area),
+                    keywords=keywords,
+                    submission_number=existing_text("submission_number", snapshot.submission_number),
+                    published_at=existing_text("published_at", snapshot.published_at),
+                    modified_at=existing_text("modified_at", snapshot.modified_at),
                 ).to_dict()
                 if existing.get("collected_at"):
                     paper["collected_at"] = existing["collected_at"]
-                by_url[url] = paper
-                task.paper_states[url] = "success"
-                task.paper_errors.pop(url, None)
-                self._write_paper(task, paper)
+                prepared_by_url[url] = paper
+                prepared_states[url] = "success"
+                prepared_errors.pop(url, None)
+                original_snapshot = next(
+                    item for item in request.papers if canonical_paper_url(item.url) == url
+                )
+                if original_snapshot.html:
+                    raw_html[url] = original_snapshot.html
+
+            # Persist records only after every item has passed validation, then
+            # publish the in-memory state in one step.
+            for url, paper in prepared_by_url.items():
+                if url in {item_url for item_url, _ in normalized}:
+                    self._write_paper(task, paper)
+                    if url in raw_html:
+                        self._atomic_write_text(self._paper_raw_path(task, url), raw_html[url])
+            task.paper_states = prepared_states
+            task.paper_errors = prepared_errors
+            by_url = prepared_by_url
 
             task.papers = [by_url[url] for url in task.paper_urls if url in by_url]
             task.error = None
@@ -553,6 +752,9 @@ class TaskManager:
         try:
             if task.mode == "acl":
                 self._run_acl(task_id, force)
+                return
+            if task.mode == "openreview":
+                self._run_openreview(task_id, force)
                 return
             from .main import run
 
@@ -661,6 +863,136 @@ class TaskManager:
         with self.lock:
             self._settle_acl_task(self.tasks[task_id])
 
+    def _run_openreview(self, task_id: str, force: bool) -> None:
+        with self.lock:
+            task = self.tasks[task_id]
+            if force:
+                self._clear_acl_outputs(task)
+                task.papers.clear()
+                task.paper_urls.clear()
+                task.paper_states.clear()
+                task.paper_errors.clear()
+                self._refresh_acl_counts(task)
+                self.save(task)
+            collection = (
+                None
+                if is_openreview_forum_url(task.url)
+                else collection_from_url(task.url)
+            )
+
+        try:
+            with make_openreview_client(task.output_dir) as client:
+                if is_openreview_forum_url(task.url):
+                    if not task.paper_urls:
+                        with self.lock:
+                            task = self.tasks[task_id]
+                            task.paper_urls = [canonical_paper_url(task.url)]
+                            task.paper_states = {task.paper_urls[0]: "pending"}
+                            self._refresh_acl_counts(task)
+                            self._append_log(task, "单篇 OpenReview 论文已加入采集队列")
+                            self.save(task)
+                elif not task.paper_urls:
+                    refs = client.discover(collection)
+                    urls = [canonical_paper_url(ref.url) for ref in refs]
+                    if not urls:
+                        raise ValueError("OpenReview 分组没有发现可采集的论文")
+                    with self.lock:
+                        task = self.tasks[task_id]
+                        task.paper_urls = list(dict.fromkeys(urls))
+                        task.paper_states = {
+                            url: "pending" for url in task.paper_urls
+                        }
+                        self._refresh_acl_counts(task)
+                        self._append_log(task, f"发现 {len(task.paper_urls)} 篇论文")
+                        self.save(task)
+
+                for url in list(self.tasks[task_id].paper_urls):
+                    with self.lock:
+                        task = self.tasks[task_id]
+                        self._refresh_acl_counts(task)
+                        if self._acl_limit_reached(task):
+                            self._settle_acl_task(task)
+                            return
+                        if task.paper_states.get(url, "pending") != "pending":
+                            continue
+                        task.paper_states[url] = "running"
+                        task.current_name = url
+                        self._refresh_acl_counts(task)
+                        self.save(task)
+                    try:
+                        paper = self._fetch_openreview_paper(
+                            client, url, collection=collection
+                        )
+                        with self.lock:
+                            task = self.tasks[task_id]
+                            task.papers = [
+                                item for item in task.papers if item.get("url") != url
+                            ] + [paper.to_dict()]
+                            task.paper_states[url] = "success"
+                            task.paper_errors.pop(url, None)
+                            self._write_paper(task, task.papers[-1])
+                            self._refresh_acl_counts(task)
+                            self._append_log(
+                                task, f"采集成功：{paper_id_from_url(url)}"
+                            )
+                            self.save(task)
+                            if self._acl_limit_reached(task):
+                                self._settle_acl_task(task)
+                                return
+                    except OpenReviewChallengeError:
+                        raise
+                    except Exception as exc:
+                        with self.lock:
+                            task = self.tasks[task_id]
+                            task.paper_states[url] = "fail"
+                            task.paper_errors[url] = f"{type(exc).__name__}: {exc}"
+                            self._refresh_acl_counts(task)
+                            self._append_log(
+                                task,
+                                f"采集失败：{paper_id_from_url(url)} - "
+                                f"{task.paper_errors[url]}",
+                            )
+                            self.save(task)
+        except OpenReviewChallengeError as exc:
+            self._await_openreview_browser(task_id, exc)
+            return
+        with self.lock:
+            self._settle_acl_task(self.tasks[task_id])
+
+    def _fetch_openreview_paper(
+        self,
+        client: Any,
+        url: str,
+        *,
+        collection: Any,
+    ) -> Paper:
+        paper = client.fetch_paper(url, collection=collection)
+        if canonical_paper_url(paper.url) != url:
+            raise ValueError("OpenReview 返回的 forum id 与任务不一致")
+        return paper
+
+    def _await_openreview_browser(
+        self, task_id: str, exc: OpenReviewChallengeError
+    ) -> None:
+        with self.lock:
+            task = self.tasks[task_id]
+            # A challenge is an infrastructure-level pause, not a paper
+            # failure.  Return the in-flight item to pending so the counters
+            # retain the invariant discovered = success + failed + pending.
+            for url, state in list(task.paper_states.items()):
+                if state == "running":
+                    task.paper_states[url] = "pending"
+            task.status = "awaiting_browser"
+            task.current_name = None
+            task.error = str(exc)
+            task.finished_at = datetime.now(timezone.utc).isoformat()
+            self._refresh_acl_counts(task)
+            self._append_log(
+                task,
+                "OpenReview 需要浏览器验证；请导入分组/论文页面快照后继续",
+            )
+            self.save(task)
+
     @staticmethod
     def _acl_limit_reached(task: TaskRecord) -> bool:
         return task.limit is not None and task.counts["processed"] >= task.limit
@@ -743,7 +1075,7 @@ class TaskManager:
         return result
 
     def failures(self, task: TaskRecord) -> list[dict[str, str]]:
-        if task.mode == "acl":
+        if task.mode in PAPER_MODES:
             return [{"name": url, "profile_url": url, "error": task.paper_errors.get(url, "")} for url, state in task.paper_states.items() if state == "fail"]
         storage = Storage(task.output_dir)
         return [{"name": storage.state.failed_names.get(url, ""), "profile_url": url, "error": error} for url, error in storage.state.failed.items()]
@@ -756,7 +1088,7 @@ class TaskManager:
             targets = [item for item in self.failures(task) if url is None or item["profile_url"] == url]
             if not targets:
                 raise ValueError("当前没有失败条目")
-            if task.mode == "acl" and task.limit is not None:
+            if task.mode in PAPER_MODES and task.limit is not None:
                 available = task.limit - task.counts["processed"]
                 if available < len(targets):
                     raise ValueError(
@@ -768,6 +1100,12 @@ class TaskManager:
             self.save(task)
         if task.mode == "acl":
             self.executor.submit(self._retry_acl, task_id, [item["profile_url"] for item in targets])
+        elif task.mode == "openreview":
+            self.executor.submit(
+                self._retry_openreview,
+                task_id,
+                [item["profile_url"] for item in targets],
+            )
         else:
             self.executor.submit(self._retry_teacher, task_id, targets)
         return task
@@ -834,6 +1172,71 @@ class TaskManager:
         with self.lock:
             self._append_log(self.tasks[task_id], message)
 
+    def _retry_openreview(self, task_id: str, urls: list[str]) -> None:
+        try:
+            with self.lock:
+                task = self.tasks[task_id]
+                collection = (
+                    None
+                    if is_openreview_forum_url(task.url)
+                    else collection_from_url(task.url)
+                )
+            with make_openreview_client(task.output_dir) as client:
+                for url in urls:
+                    with self.lock:
+                        task = self.tasks[task_id]
+                        task.paper_states[url] = "running"
+                        task.current_name = url
+                        self._refresh_acl_counts(task)
+                        self.save(task)
+                    try:
+                        paper = self._fetch_openreview_paper(
+                            client, url, collection=collection
+                        )
+                        with self.lock:
+                            task = self.tasks[task_id]
+                            task.papers = [
+                                item
+                                for item in task.papers
+                                if item.get("url") != url
+                            ] + [paper.to_dict()]
+                            task.paper_states[url] = "success"
+                            task.paper_errors.pop(url, None)
+                            self._write_paper(task, task.papers[-1])
+                            self._refresh_acl_counts(task)
+                            self._append_log(
+                                task, f"重试成功：{paper_id_from_url(url)}"
+                            )
+                            self.save(task)
+                    except OpenReviewChallengeError:
+                        raise
+                    except Exception as exc:
+                        with self.lock:
+                            task = self.tasks[task_id]
+                            task.paper_states[url] = "fail"
+                            task.paper_errors[url] = f"{type(exc).__name__}: {exc}"
+                            self._refresh_acl_counts(task)
+                            self._append_log(
+                                task,
+                                f"重试失败：{paper_id_from_url(url)} - "
+                                f"{task.paper_errors[url]}",
+                            )
+                            self.save(task)
+            with self.lock:
+                self._settle_acl_task(self.tasks[task_id], retry_only=True)
+        except OpenReviewChallengeError as exc:
+            self._await_openreview_browser(task_id, exc)
+        except Exception as exc:
+            with self.lock:
+                task = self.tasks[task_id]
+                for url in urls:
+                    if task.paper_states.get(url) == "running":
+                        task.paper_states[url] = "fail"
+                        task.paper_errors[url] = f"{type(exc).__name__}: {exc}"
+                task.error = f"{type(exc).__name__}: {exc}"
+                self._refresh_acl_counts(task)
+                self._settle_acl_task(task, retry_only=True)
+
     def _retry_teacher(self, task_id: str, failures: list[dict[str, str]]) -> None:
         try:
             from .main import retry_failed_profiles
@@ -858,6 +1261,7 @@ class TaskManager:
             )
             exportable = task.status in {
                 "paused",
+                "awaiting_browser",
                 "completed",
                 "completed_with_errors",
             }
@@ -865,7 +1269,7 @@ class TaskManager:
             if exportable:
                 csv_url = (
                     f"/api/tasks/{task.id}/papers.csv"
-                    if task.mode == "acl"
+                    if task.mode in PAPER_MODES
                     else f"/api/tasks/{task.id}/teachers.csv"
                 )
             if task.limit is not None:
@@ -898,7 +1302,7 @@ class TaskManager:
                 ),
                 "csv_url": csv_url,
             }
-            if task.mode != "acl":
+            if task.mode not in PAPER_MODES:
                 data["teachers"] = [
                     {
                         **item,
@@ -922,8 +1326,8 @@ class TaskManager:
     ) -> dict[str, Any]:
         with self.lock:
             task = self.get(task_id)
-            if task.mode != "acl":
-                raise ValueError("当前任务不是 ACL 论文任务")
+            if task.mode not in PAPER_MODES:
+                raise ValueError("当前任务不是论文任务")
             by_url = {str(paper.get("url")): paper for paper in task.papers}
             rows: list[dict[str, Any]] = []
             for url in task.paper_urls:
@@ -972,6 +1376,14 @@ class TaskManager:
                             " ".join(str(author) for author in row.get("authors", [])),
                             str(row.get("abstract_en", "")),
                             str(row.get("abstract_zh", "")),
+                            str(row.get("venue", "")),
+                            str(row.get("decision", "")),
+                            str(row.get("decision_comment", "")),
+                            str(row.get("tldr", "")),
+                            str(row.get("lay_summary", "")),
+                            str(row.get("primary_area", "")),
+                            " ".join(str(value) for value in row.get("keywords", [])),
+                            str(row.get("submission_number", "")),
                             str(row.get("url", "")),
                             str(row.get("error", "")),
                         ]
@@ -994,19 +1406,19 @@ class TaskManager:
 
     def csv_path(self, task_id: str) -> Path:
         task = self.get(task_id)
-        if task.mode == "acl":
+        if task.mode in PAPER_MODES:
             rows = self.paper_page(task_id, limit=max(1, len(task.paper_urls)))["papers"]
             return write_csv(task.output_dir / "papers.csv", rows)
         return TeacherRepository(task.output_dir / "teacher_data.db").export_csv(task.output_dir / "teachers.csv")
 
     def zip_path(self, task_id: str) -> Path:
         task = self.get(task_id)
-        if task.mode == "acl":
+        if task.mode in PAPER_MODES:
             self.csv_path(task_id)
         destination = task.output_dir / f"source-{task.id[:8]}.zip"
         temp = task.output_dir / ".source.zip.tmp"
         with ZipFile(temp, "w", ZIP_DEFLATED) as archive:
-            if task.mode == "acl":
+            if task.mode in PAPER_MODES:
                 csv_path = task.output_dir / "papers.csv"
                 archive.write(csv_path, "papers.csv")
                 for paper in task.papers:
@@ -1040,7 +1452,7 @@ class TaskManager:
 
 MANAGER = TaskManager()
 atexit.register(MANAGER.close)
-app = FastAPI(title="Teacher and ACL Crawler", version="0.2.0")
+app = FastAPI(title="Teacher and Paper Crawler", version="0.3.0")
 
 
 def task_or_404(task_id: str) -> TaskRecord:
@@ -1080,7 +1492,7 @@ def import_browser_discovery(
     try:
         MANAGER.import_acm_discovery(task_id, request)
         return MANAGER.snapshot(task_id)
-    except ValueError as exc:
+    except (ValueError, OpenReviewError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
@@ -1093,7 +1505,7 @@ def import_browser_papers(
     try:
         MANAGER.import_acm_papers(task_id, request)
         return MANAGER.snapshot(task_id)
-    except ValueError as exc:
+    except (ValueError, OpenReviewError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
@@ -1101,8 +1513,8 @@ def import_browser_papers(
 def continue_task(task_id: str, request: ContinueRequest) -> dict[str, Any]:
     with MANAGER.lock:
         task = task_or_404(task_id)
-        if task.status != "paused":
-            raise HTTPException(400, "当前任务不是暂停状态")
+        if task.status not in {"paused", "awaiting_browser"}:
+            raise HTTPException(400, "当前任务不是可继续状态")
         new_limit = request.limit if request.limit is not None else task.limit
         if new_limit is not None and new_limit <= task.counts["processed"]:
             raise HTTPException(
@@ -1129,7 +1541,7 @@ def reset_task(task_id: str) -> dict[str, Any]:
         ):
             raise HTTPException(
                 409,
-                "该 ACM 任务来自浏览器快照，强制重抓会因站点验证丢失现有结果",
+                "该任务来自浏览器快照，强制重抓会因站点验证丢失现有结果",
             )
         task.status = "queued"
         task.error = None
@@ -1138,7 +1550,7 @@ def reset_task(task_id: str) -> dict[str, Any]:
         task.paper_urls.clear()
         task.paper_states.clear()
         task.paper_errors.clear()
-        if task.mode == "acl":
+        if task.mode in PAPER_MODES:
             MANAGER._refresh_acl_counts(task)
         else:
             task.counts = {
@@ -1195,7 +1607,7 @@ def papers_page(
 @app.get("/api/tasks/{task_id}/research")
 def research(task_id: str, q: str = "", recruit_type: str = "", has_recruit_info: bool | None = None, has_email: bool | None = None, favorite: bool | None = None, contact_status: str = "", sort: str = "recruit_score", order: str = "desc") -> dict[str, Any]:
     task = task_or_404(task_id)
-    if task.mode == "acl": return {"count": 0, "teachers": []}
+    if task.mode in PAPER_MODES: return {"count": 0, "teachers": []}
     rows = TeacherRepository(task.output_dir / "teacher_data.db").list(query=q.strip(), recruit_type=recruit_type, has_recruit_info=has_recruit_info, has_email=has_email, favorite=favorite, contact_status=contact_status, sort=sort, order=order)
     return {"count": len(rows), "teachers": rows}
 
@@ -1225,7 +1637,8 @@ def update_paper(task_id: str, paper_url: str, update: PaperUpdate) -> dict[str,
                 if update.favorite is not None:
                     paper["favorite"] = update.favorite
                 MANAGER._write_paper(task, paper)
-                MANAGER._refresh_acl_counts(task)
+                if task.mode in PAPER_MODES:
+                    MANAGER._refresh_acl_counts(task)
                 MANAGER.save(task)
                 return paper
     raise HTTPException(404, "论文记录不存在")
@@ -1238,7 +1651,7 @@ def paper_raw(task_id: str, url: str) -> FileResponse:
         url = canonical_paper_url(url)
     except ValueError as exc:
         raise HTTPException(404, "原始网页不存在") from exc
-    if task.mode != "acl" or task.paper_states.get(url) != "success":
+    if task.mode not in PAPER_MODES or task.paper_states.get(url) != "success":
         raise HTTPException(404, "原始网页不存在")
     path = MANAGER._resolve_paper_raw_path(task, url)
     if not path.is_file():

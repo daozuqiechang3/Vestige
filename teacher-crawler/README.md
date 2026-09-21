@@ -56,7 +56,11 @@ ACL 模式接受 Anthology 文集卷页面或单篇论文页面。文集页会�
 
 论文模式也接受 ACM Digital Library proceedings 的具体 SESSION 链接（必须带 `#headingN`，例如 `#heading2`）和单篇 DOI 页面。工具会把 fragment 转换成 ACM 实际使用的 `tocHeading` 参数，并读取该标题之后、下一个 SESSION 标题之前的全部论文。ACM 对普通 HTTP 客户端可能返回 403；出现该提示时需要先通过浏览器获取页面，不能通过提高重试次数绕过站点验证。
 
-ACL 论文状态按 URL 唯一计算，满足“发现 = 成功 + 失败 + 跳过 + 待采集 + 采集中”。失败重试不会重复累加失败数，也不会突破成功论文上限。任务摘要保存在 `task.json`，论文详情按 Anthology ID 保存在 `papers/`，原始页面保存在 `html/`；论文列表由服务端分页返回，CSV 包含成功、失败和待采集条目。
+OpenReview 模式接受带明确 tab 的 group URL（例如 ICML 2026 `#tab-accept-spotlight`）以及单篇 `/forum?id=...` URL。分组发现同时限定 `venue`、`invitation` 和 `domain`，不会把 regular 或 reject 论文混入 spotlight。采集字段包括标题、作者与主页、Published/Last Modified、venue、decision、TL;DR、Abstract、Lay Summary、Primary Area、Keywords、PDF、Originally Submitted PDF、Submission Number 和官方 Paper Decision 的 Comment。
+
+OpenReview 的公开 API 可能返回 `ChallengeRequiredError`。工具遇到第一次 Challenge 会进入“等待浏览器验证”，把当前论文退回待采集，不会把同一个站点级错误重复记成数百篇论文失败。Web 页面会显示“OpenReview 浏览器验证导入”：可以导入当前分组的论文 URL 数组、分组页 HTML，或分批导入论文快照 JSON。论文快照支持直接提供结构化字段，也支持 `{ "url": "...", "html": "完整详情页 HTML" }`，后端会解析正文和官方 Decision Comment。
+
+所有论文状态按 URL 唯一计算，满足“发现 = 成功 + 失败 + 跳过 + 待采集 + 采集中”。失败重试不会重复累加失败数，也不会突破成功论文上限。任务摘要保存在 `task.json`，论文详情按稳定论文 ID 保存在 `papers/`，原始页面保存在 `html/`；论文列表由服务端分页返回，CSV 包含成功、失败和待采集条目。CSV 保留原 ACL/ACM 列顺序，并把 OpenReview 扩展字段追加在末尾。
 
 导师筛选支持：
 

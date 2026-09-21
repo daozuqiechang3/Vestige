@@ -10,6 +10,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from crawler.acl import Paper, extract_paper
+from crawler.openreview import OpenReviewPaperRef
 from crawler.web import (
     BrowserDiscoveryRequest,
     BrowserPaperSnapshot,
@@ -35,9 +36,10 @@ def test_web_index_and_health() -> None:
     assert "教师信息采集" in index.text
     assert "失败教师" in index.text
     assert "全部重试失败项" in index.text
-    assert "ACL / ACM 论文合集、分组或详情页 URL" in index.text
+    assert "ACL / ACM / OpenReview 论文合集、分组或详情页 URL" in index.text
     assert "论文采集（ACL / ACM）" in index.text
-    assert "if(mode()==='acl')renderResults(currentTask)" in index.text
+    assert "论文采集（OpenReview）" in index.text
+    assert "mode()==='acl'||mode()==='openreview'" in index.text
     assert "acl-table" in index.text
     assert "中文标题 / English Title" in index.text
     assert "标题自动翻译失败，已保留英文" in index.text
@@ -50,9 +52,12 @@ def test_web_index_and_health() -> None:
     assert "currentTask.url===body.url" in index.text
     assert 'pattern="[1-9][0-9]*"' in index.text
     assert "replace(/\\D/g,'')" in index.text
-    assert "t.status==='paused'?'继续采集':'开始采集'" in index.text
+    assert "t.status==='paused'||t.status==='awaiting_browser'" in index.text
     assert "新采集上限必须大于当前成功数" in index.text
     assert "$('#url').value=t.url" in index.text
+    assert "$('#mode').value=t.mode" in index.text
+    assert "/browser-discovery" in index.text
+    assert "/browser-papers" in index.text
     assert index.headers["cache-control"] == "no-store"
     assert health.json() == {"status": "ok"}
 
@@ -692,3 +697,442 @@ def test_acm_create_reuses_existing_session_result(tmp_path: Path) -> None:
     assert created is task
     assert created.id == "existing-acm"
     assert any("复用已有采集结果" in log for log in created.logs)
+
+
+def test_web_creates_openreview_spotlight_task(tmp_path: Path, monkeypatch) -> None:
+    import crawler.web as web_module
+
+    submissions: list[tuple[object, ...]] = []
+
+    class FakeExecutor:
+        def submit(self, *args: object) -> None:
+            submissions.append(args)
+
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    manager.executor = FakeExecutor()
+    manager.tasks = {}
+    monkeypatch.setattr(web_module, "TASKS_DIR", tmp_path)
+
+    task = manager.create(
+        CrawlRequest(
+            url=(
+                "https://openreview.net/group?id=ICML.cc/2026/Conference"
+                "#tab-accept-spotlight"
+            ),
+            mode="openreview",
+            limit=10,
+        )
+    )
+
+    assert task.mode == "openreview"
+    assert task.school == "ICML 2026"
+    assert task.college == "ICML 2026 spotlight"
+    assert task.url.endswith("#tab-accept-spotlight")
+    assert len(submissions) == 1
+
+
+def test_openreview_limit_uses_shared_paper_state_machine(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import crawler.web as web_module
+
+    urls = [
+        "https://openreview.net/forum?id=paper01",
+        "https://openreview.net/forum?id=paper02",
+    ]
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def discover(self, _collection):
+            return [
+                OpenReviewPaperRef(url=url, forum_id=url.rsplit("=", 1)[-1])
+                for url in urls
+            ]
+
+        def fetch_paper(self, url: str, collection=None):
+            return Paper(
+                "OpenReview title",
+                "OpenReview title",
+                "",
+                "Abstract",
+                "Abstract",
+                url,
+                parser_mode="OpenReview API",
+                source="OpenReview",
+                venue="ICML 2026 spotlight",
+                decision="Accept (spotlight)",
+            )
+
+    monkeypatch.setattr(
+        web_module, "make_openreview_client", lambda _output_dir: FakeClient()
+    )
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    task = TaskRecord(
+        "openreview-limit",
+        (
+            "https://openreview.net/group?id=ICML.cc/2026/Conference"
+            "#tab-accept-spotlight"
+        ),
+        "openreview",
+        limit=1,
+        output_dir=tmp_path / "task",
+    )
+    manager.tasks = {task.id: task}
+
+    manager._run_openreview(task.id, force=False)
+
+    assert task.counts["discovered"] == 2
+    assert task.counts["processed"] == 1
+    assert task.counts["pending"] == 1
+    assert task.status == "paused"
+    assert manager._paper_record_path(task, urls[0]).is_file()
+
+
+def test_openreview_challenge_pauses_batch_without_marking_papers_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import crawler.web as web_module
+    from crawler.openreview import OpenReviewChallengeError
+
+    urls = [
+        "https://openreview.net/forum?id=paper01",
+        "https://openreview.net/forum?id=paper02",
+    ]
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def fetch_paper(self, _url, collection=None):
+            raise OpenReviewChallengeError("需要浏览器验证")
+
+    monkeypatch.setattr(web_module, "make_openreview_client", lambda _out: FakeClient())
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    task = TaskRecord(
+        "openreview-challenge",
+        "https://openreview.net/group?id=ICML.cc/2026/Conference#tab-accept-spotlight",
+        "openreview",
+        status="running",
+        output_dir=tmp_path / "task",
+        paper_urls=urls,
+        paper_states={url: "pending" for url in urls},
+    )
+    manager.tasks = {task.id: task}
+
+    manager._run_openreview(task.id, force=False)
+
+    assert task.status == "awaiting_browser"
+    assert task.counts["failed"] == 0
+    assert task.counts["pending"] == 2
+    assert set(task.paper_states.values()) == {"pending"}
+
+
+def test_openreview_browser_discovery_merges_paginated_pages(tmp_path: Path) -> None:
+    first = "https://openreview.net/forum?id=paper01"
+    second = "https://openreview.net/forum?id=paper02"
+    third = "https://openreview.net/forum?id=paper03"
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    task = TaskRecord(
+        "openreview-discovery-pages",
+        "https://openreview.net/group?id=ICML.cc/2026/Conference#tab-accept-spotlight",
+        "openreview",
+        status="awaiting_browser",
+        output_dir=tmp_path / "task",
+        paper_urls=[first, second],
+        paper_states={first: "success", second: "pending"},
+        papers=[Paper("First", "First", "", "A", "A", first).to_dict()],
+    )
+    manager.tasks = {task.id: task}
+
+    manager.import_acm_discovery(
+        task.id,
+        BrowserDiscoveryRequest(
+            conference="ICML 2026",
+            session="ICML 2026 spotlight",
+            paper_urls=[second, third],
+        ),
+    )
+
+    assert task.paper_urls == [first, second, third]
+    assert task.paper_states == {
+        first: "success",
+        second: "pending",
+        third: "pending",
+    }
+    assert task.counts["discovered"] == 3
+
+
+def test_browser_import_rejects_acl_anthology_task(tmp_path: Path) -> None:
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    task = TaskRecord(
+        "acl-browser-import",
+        "https://aclanthology.org/volumes/2026.acl-long/",
+        "acl",
+        status="paused",
+        output_dir=tmp_path / "task",
+    )
+    manager.tasks = {task.id: task}
+
+    with pytest.raises(ValueError, match="不是 ACM 或 OpenReview"):
+        manager.import_acm_discovery(
+            task.id,
+            BrowserDiscoveryRequest(
+                conference="ACM",
+                session="Session",
+                paper_urls=["https://dl.acm.org/doi/10.65109/HQQZ1937"],
+            ),
+        )
+
+
+def test_openreview_single_forum_task_is_supported(tmp_path: Path, monkeypatch) -> None:
+    import crawler.web as web_module
+
+    submissions: list[tuple[object, ...]] = []
+
+    class FakeExecutor:
+        def submit(self, *args: object) -> None:
+            submissions.append(args)
+
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    manager.executor = FakeExecutor()
+    manager.tasks = {}
+    monkeypatch.setattr(web_module, "TASKS_DIR", tmp_path)
+
+    task = manager.create(
+        CrawlRequest(
+            url="https://openreview.net/forum?id=aIH1jyU37z",
+            mode="openreview",
+        )
+    )
+
+    assert task.url == "https://openreview.net/forum?id=aIH1jyU37z"
+    assert task.college == "OpenReview 论文"
+    assert len(submissions) == 1
+
+
+def test_openreview_search_includes_extended_metadata(tmp_path: Path) -> None:
+    url = "https://openreview.net/forum?id=aIH1jyU37z"
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    paper = Paper(
+        "Paper",
+        "Paper",
+        "",
+        "Abstract",
+        "Abstract",
+        url,
+        source="OpenReview",
+        venue="ICML 2026 spotlight",
+        decision_comment="Reviewers were very positive",
+        primary_area="Theory->Deep Learning",
+        keywords=["Categorical Symmetry"],
+    ).to_dict()
+    task = TaskRecord(
+        "openreview-search",
+        "https://openreview.net/group?id=ICML.cc/2026/Conference#tab-accept-spotlight",
+        "openreview",
+        status="completed",
+        output_dir=tmp_path / "task",
+        paper_urls=[url],
+        paper_states={url: "success"},
+        papers=[paper],
+    )
+    manager.tasks = {task.id: task}
+
+    assert manager.paper_page(task.id, query="Categorical Symmetry")["count"] == 1
+    assert manager.paper_page(task.id, query="very positive")["count"] == 1
+
+
+def test_openreview_browser_snapshot_keeps_requested_metadata(tmp_path: Path) -> None:
+    url = "https://openreview.net/forum?id=aIH1jyU37z"
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    task = TaskRecord(
+        "openreview-browser",
+        (
+            "https://openreview.net/group?id=ICML.cc/2026/Conference"
+            "#tab-accept-spotlight"
+        ),
+        "openreview",
+        status="paused",
+        output_dir=tmp_path / "task",
+        paper_urls=[url],
+        paper_states={url: "pending"},
+    )
+    manager.tasks = {task.id: task}
+
+    manager.import_acm_papers(
+        task.id,
+        BrowserPapersRequest(
+            papers=[
+                BrowserPaperSnapshot(
+                    url=url,
+                    title="Foundations of Equivariant Deep Learning",
+                    authors=["Yoshihiro Maruyama"],
+                    abstract_en="Symmetry is everywhere.",
+                    venue="ICML 2026 spotlight",
+                    decision="Accept (spotlight)",
+                    decision_comment="Reviewers were very positive.",
+                    tldr="Beyond group symmetries.",
+                    lay_summary="A general framework.",
+                    primary_area="Theory->Deep Learning",
+                    keywords=["Geometric Deep Learning"],
+                    submission_number="34584",
+                )
+            ],
+            complete=True,
+        ),
+    )
+
+    paper = task.papers[0]
+    assert task.status == "completed"
+    assert paper["source"] == "OpenReview"
+    assert paper["decision"] == "Accept (spotlight)"
+    assert paper["decision_comment"] == "Reviewers were very positive."
+    assert paper["submission_number"] == "34584"
+
+
+def test_browser_snapshot_partial_update_preserves_existing_openreview_fields(
+    tmp_path: Path,
+) -> None:
+    url = "https://openreview.net/forum?id=aIH1jyU37z"
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    existing = Paper(
+        "Foundations",
+        "基础",
+        "https://openreview.net/attachment?id=aIH1jyU37z&name=pdf",
+        "Original abstract",
+        "原摘要",
+        url,
+        authors=["Yoshihiro Maruyama"],
+        venue="ICML 2026 spotlight",
+        decision="Accept (spotlight)",
+        tldr="Original TL;DR",
+        lay_summary="Original lay summary",
+        keywords=["Equivariance"],
+    ).to_dict()
+    task = TaskRecord(
+        "openreview-partial",
+        "https://openreview.net/group?id=ICML.cc/2026/Conference#tab-accept-spotlight",
+        "openreview",
+        status="paused",
+        output_dir=tmp_path / "task",
+        paper_urls=[url],
+        paper_states={url: "success"},
+        papers=[existing],
+    )
+    manager.tasks = {task.id: task}
+
+    manager.import_acm_papers(
+        task.id,
+        BrowserPapersRequest(
+            papers=[BrowserPaperSnapshot(url=url, title="Foundations updated")]
+        ),
+    )
+
+    paper = task.papers[0]
+    assert paper["title"] == "Foundations updated"
+    assert paper["abstract_en"] == "Original abstract"
+    assert paper["authors"] == ["Yoshihiro Maruyama"]
+    assert paper["venue"] == "ICML 2026 spotlight"
+    assert paper["decision"] == "Accept (spotlight)"
+    assert paper["tldr"] == "Original TL;DR"
+
+
+def test_openreview_browser_html_snapshot_is_parsed_and_saved(tmp_path: Path) -> None:
+    url = "https://openreview.net/forum?id=aIH1jyU37z"
+    html = """
+    <html><head>
+      <meta name="citation_author" content="Yoshihiro Maruyama">
+    </head><body><main>
+      <h2>Foundations of Equivariant Deep Learning</h2>
+      <div><strong class="note-content-field">Abstract:</strong>
+        <div class="note-content-value">Symmetry is everywhere.</div></div>
+      <div><strong class="note-content-field">Lay Summary:</strong>
+        <div class="note-content-value">A general framework.</div></div>
+      <div><strong class="note-content-field">Primary Area:</strong>
+        <span class="note-content-value">Theory-&gt;Deep Learning</span></div>
+      <div class="note" data-id="decision1">
+        <div class="heading"><h4>Paper Decision</h4></div>
+        <strong class="note-content-field">Decision:</strong>
+        <span class="note-content-value">Accept (spotlight)</span>
+        <strong class="note-content-field">Comment:</strong>
+        <div class="note-content-value">Reviewers were very positive.</div>
+      </div>
+    </main></body></html>
+    """
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    task = TaskRecord(
+        "openreview-html",
+        "https://openreview.net/group?id=ICML.cc/2026/Conference#tab-accept-spotlight",
+        "openreview",
+        status="paused",
+        output_dir=tmp_path / "task",
+        paper_urls=[url],
+        paper_states={url: "pending"},
+    )
+    manager.tasks = {task.id: task}
+
+    manager.import_acm_papers(
+        task.id,
+        BrowserPapersRequest(
+            papers=[BrowserPaperSnapshot(url=url, html=html)], complete=True
+        ),
+    )
+
+    assert task.status == "completed"
+    assert task.papers[0]["decision_comment"] == "Reviewers were very positive."
+    assert task.papers[0]["primary_area"] == "Theory->Deep Learning"
+    assert manager._paper_raw_path(task, url).read_text(encoding="utf-8") == html
+
+
+def test_browser_snapshot_batch_validation_is_atomic(tmp_path: Path) -> None:
+    first = "https://openreview.net/forum?id=paper01"
+    second = "https://openreview.net/forum?id=paper02"
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    task = TaskRecord(
+        "openreview-atomic",
+        "https://openreview.net/group?id=ICML.cc/2026/Conference#tab-accept-spotlight",
+        "openreview",
+        status="paused",
+        output_dir=tmp_path / "task",
+        paper_urls=[first, second],
+        paper_states={first: "pending", second: "pending"},
+    )
+    manager.tasks = {task.id: task}
+
+    with pytest.raises(ValueError, match="PDF 与任务来源不一致"):
+        manager.import_acm_papers(
+            task.id,
+            BrowserPapersRequest(
+                papers=[
+                    BrowserPaperSnapshot(url=first, title="First"),
+                    BrowserPaperSnapshot(
+                        url=second,
+                        title="Second",
+                        pdf_url="https://outside.example/paper.pdf",
+                    ),
+                ]
+            ),
+        )
+
+    assert task.papers == []
+    assert task.paper_states == {first: "pending", second: "pending"}
+    assert not (task.output_dir / "papers").exists()
