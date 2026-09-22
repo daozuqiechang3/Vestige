@@ -36,7 +36,7 @@ def test_web_index_and_health() -> None:
     assert "教师信息采集" in index.text
     assert "失败教师" in index.text
     assert "全部重试失败项" in index.text
-    assert "ACL / ACM / OpenReview 论文合集、分组或详情页 URL" in index.text
+    assert "ACL / ACM / ICLR / OpenReview 论文合集、分组或详情页 URL" in index.text
     assert "论文采集（ACL / ACM）" in index.text
     assert "论文采集（OpenReview）" in index.text
     assert "mode()==='acl'||mode()==='openreview'" in index.text
@@ -126,6 +126,39 @@ def test_web_creates_acm_session_task_with_normalized_url(
     )
     assert task.school == "ACM Digital Library"
     assert task.output_dir.parent == tmp_path
+    assert len(submissions) == 1
+
+
+def test_web_creates_iclr_collection_task_with_source(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import crawler.web as web_module
+
+    submissions: list[tuple[object, ...]] = []
+
+    class FakeExecutor:
+        def submit(self, *args: object) -> None:
+            submissions.append(args)
+
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    manager.executor = FakeExecutor()
+    manager.tasks = {}
+    monkeypatch.setattr(web_module, "TASKS_DIR", tmp_path)
+
+    task = manager.create(
+        web_module.CrawlRequest(
+            url="https://proceedings.iclr.cc/paper_files/paper/2026/",
+            mode="acl",
+            limit=None,
+        )
+    )
+
+    assert task.url == "https://proceedings.iclr.cc/paper_files/paper/2026"
+    assert task.mode == "acl"
+    assert task.limit is None
+    assert task.school == "ICLR Proceedings"
+    assert task.college == "ICLR Proceedings"
     assert len(submissions) == 1
 
 
@@ -254,6 +287,76 @@ def test_acl_limit_counts_successes_and_stops_immediately(
     assert pending["count"] == 1
     assert failures["count"] == 1
     assert failures["papers"][0]["error"] == "RuntimeError: invalid paper"
+
+
+def test_iclr_unlimited_collection_processes_every_discovered_paper(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import crawler.web as web_module
+
+    collection = "https://proceedings.iclr.cc/paper_files/paper/2026"
+    urls = [
+        (
+            "https://proceedings.iclr.cc/paper_files/paper/2026/hash/"
+            "0021c2cb1b9b6a71ac478ea52a93b25a-Abstract-Conference.html"
+        ),
+        (
+            "https://proceedings.iclr.cc/paper_files/paper/2026/hash/"
+            "ffffd32092164225bb302d438cacbc61-Abstract-Conference.html"
+        ),
+    ]
+    fetched: list[str] = []
+
+    class FakeFetcher:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def fetch(self, url: str, use_cache: bool = True):
+            fetched.append(url)
+            return SimpleNamespace(url=url, text=f"page:{url}")
+
+    monkeypatch.setattr(web_module, "make_fetcher", lambda _output_dir: FakeFetcher())
+    monkeypatch.setattr(web_module, "discover_papers", lambda _html, _url: urls)
+    monkeypatch.setattr(
+        web_module,
+        "extract_paper",
+        lambda _html, url, log=None: Paper(
+            "ICLR title", "ICLR 标题", "", "Abstract", "摘要", url,
+            source="ICLR Proceedings",
+        ),
+    )
+
+    manager = TaskManager.__new__(TaskManager)
+    manager.lock = threading.RLock()
+    task = TaskRecord(
+        "iclr-unlimited",
+        collection,
+        "acl",
+        school="ICLR Proceedings",
+        college="ICLR Proceedings",
+        limit=None,
+        output_dir=tmp_path / "task",
+    )
+    manager.tasks = {task.id: task}
+
+    manager._run_acl(task.id, force=False)
+
+    assert fetched == [collection, *urls]
+    assert task.status == "completed"
+    assert task.counts["discovered"] == 2
+    assert task.counts["processed"] == 2
+    assert task.counts["failed"] == 0
+    assert task.counts["skipped"] == 0
+    assert task.counts["pending"] == 0
+    assert task.counts["running"] == 0
+    assert task.counts["discovered"] == sum(
+        task.counts[key]
+        for key in ("processed", "failed", "skipped", "pending", "running")
+    )
+    assert len(task.papers) == 2
 
 
 def test_paused_task_accepts_a_larger_limit(tmp_path: Path, monkeypatch) -> None:

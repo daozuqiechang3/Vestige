@@ -46,3 +46,23 @@ def test_nllb_rejects_empty_text_without_loading_model(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="不能为空"):
         translator.translate_many([""])
+
+
+def test_nllb_model_load_failure_is_not_retried_for_every_paper(
+    tmp_path: Path, monkeypatch
+) -> None:
+    translator = NllbTranslator(cache_path=tmp_path / "translations.sqlite3")
+    attempts = 0
+
+    def fail_load() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise OSError("model host timed out")
+
+    monkeypatch.setattr(translator, "_initialize_model", fail_load)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="后续翻译将直接降级"):
+            translator.translate_many(["uncached paper title"])
+
+    assert attempts == 1

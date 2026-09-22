@@ -21,6 +21,7 @@ from .nllb import get_nllb_translator
 
 ACL_DOMAIN = "aclanthology.org"
 ACM_DOMAIN = "dl.acm.org"
+ICLR_DOMAIN = "proceedings.iclr.cc"
 OPENREVIEW_DOMAIN = "openreview.net"
 OPENREVIEW_FORUM_PATH = "/forum"
 OPENREVIEW_GROUP_PATH = "/group"
@@ -37,6 +38,20 @@ ACM_PROCEEDINGS_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 ACM_HEADING_RE = re.compile(r"heading\d+")
+ICLR_COLLECTION_PATH_RE = re.compile(
+    r"/paper_files/paper/(?P<year>\d{4})/?",
+    re.IGNORECASE,
+)
+ICLR_PAPER_PATH_RE = re.compile(
+    r"/paper_files/paper/(?P<year>\d{4})/hash/"
+    r"(?P<paper_hash>[0-9a-f]{32})-Abstract-Conference\.html/?",
+    re.IGNORECASE,
+)
+ICLR_PDF_PATH_RE = re.compile(
+    r"/paper_files/paper/(?P<year>\d{4})/file/"
+    r"(?P<paper_hash>[0-9a-f]{32})-Paper-Conference\.pdf",
+    re.IGNORECASE,
+)
 DEFAULT_TRANSLATE_URL = "https://api.mymemory.translated.net/get"
 BING_TRANSLATOR_PAGE = "https://cn.bing.com/translator"
 TRANSLATE_CHUNK_SIZE = 450
@@ -95,13 +110,22 @@ def canonical_paper_url(url: str) -> str:
     match = ACM_PAPER_PATH_RE.fullmatch(parsed.path)
     if parsed.hostname == ACM_DOMAIN and match:
         return f"https://{ACM_DOMAIN}/doi/{match.group(1)}"
+    match = ICLR_PAPER_PATH_RE.fullmatch(parsed.path)
+    if parsed.hostname == ICLR_DOMAIN and match:
+        return (
+            f"https://{ICLR_DOMAIN}/paper_files/paper/{match.group('year')}/hash/"
+            f"{match.group('paper_hash').lower()}-Abstract-Conference.html"
+        )
     if parsed.hostname in {OPENREVIEW_DOMAIN, f"www.{OPENREVIEW_DOMAIN}"} and parsed.path.rstrip(
         "/"
     ) == OPENREVIEW_FORUM_PATH:
         forum_id = parse_qs(parsed.query).get("id", [""])[0].strip()
         if forum_id and re.fullmatch(r"[A-Za-z0-9_-]{6,128}", forum_id):
             return f"https://{OPENREVIEW_DOMAIN}{OPENREVIEW_FORUM_PATH}?id={forum_id}"
-    raise ValueError("不是有效的 ACL Anthology 或 ACM Digital Library 论文 URL")
+    raise ValueError(
+        "不是有效的 ACL Anthology、ACM Digital Library、ICLR Proceedings "
+        "或 OpenReview 论文 URL"
+    )
 
 
 def paper_id_from_url(url: str) -> str:
@@ -109,6 +133,10 @@ def paper_id_from_url(url: str) -> str:
     parsed = urlparse(canonical)
     if parsed.hostname == ACM_DOMAIN:
         return parsed.path.removeprefix("/doi/").replace("/", "_")
+    if parsed.hostname == ICLR_DOMAIN:
+        match = ICLR_PAPER_PATH_RE.fullmatch(parsed.path)
+        if match:
+            return f"iclr_{match.group('year')}_{match.group('paper_hash').lower()}"
     if parsed.hostname == OPENREVIEW_DOMAIN:
         forum_id = parse_qs(parsed.query).get("id", [""])[0]
         return f"openreview_{forum_id}"
@@ -140,7 +168,7 @@ def _is_front_matter(paper_id: str, page_url: str) -> bool:
 def validate_volume_url(url: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
-        raise ValueError("请输入有效的 ACL 或 ACM 论文页面 URL")
+        raise ValueError("请输入有效的 ACL、ACM、ICLR 或 OpenReview 论文页面 URL")
     if is_paper_url(url):
         return canonical_paper_url(url)
     if parsed.hostname == ACL_DOMAIN:
@@ -157,6 +185,12 @@ def validate_volume_url(url: str) -> str:
             )
         path = parsed.path.rstrip("/")
         return f"https://{ACM_DOMAIN}{path}?{urlencode({'tocHeading': heading})}"
+    iclr_collection = ICLR_COLLECTION_PATH_RE.fullmatch(parsed.path)
+    if parsed.hostname == ICLR_DOMAIN and iclr_collection:
+        return (
+            f"https://{ICLR_DOMAIN}/paper_files/paper/"
+            f"{iclr_collection.group('year')}"
+        )
     if parsed.hostname in {OPENREVIEW_DOMAIN, f"www.{OPENREVIEW_DOMAIN}"} and parsed.path.rstrip(
         "/"
     ) == OPENREVIEW_GROUP_PATH:
@@ -169,7 +203,8 @@ def validate_volume_url(url: str) -> str:
         query = urlencode({"id": group_id})
         return f"https://{OPENREVIEW_DOMAIN}{OPENREVIEW_GROUP_PATH}?{query}{('#' + tab) if tab else ''}"
     raise ValueError(
-        "论文模式只接受 ACL 文集卷/论文页、ACM 分组/论文页或 OpenReview 分组/论文页"
+        "论文模式只接受 ACL 文集卷/论文页、ACM 分组/论文页、"
+        "ICLR 合集/论文页或 OpenReview 分组/论文页"
     )
 
 
@@ -181,6 +216,9 @@ def is_paper_url(url: str) -> bool:
     ) or (
         parsed.hostname == ACM_DOMAIN
         and ACM_PAPER_PATH_RE.fullmatch(parsed.path) is not None
+    ) or (
+        parsed.hostname == ICLR_DOMAIN
+        and ICLR_PAPER_PATH_RE.fullmatch(parsed.path) is not None
     ) or (
         parsed.hostname in {OPENREVIEW_DOMAIN, f"www.{OPENREVIEW_DOMAIN}"}
         and parsed.path.rstrip("/") == OPENREVIEW_FORUM_PATH
@@ -194,7 +232,7 @@ def is_paper_url(url: str) -> bool:
 
 
 def discover_papers(html: str, page_url: str) -> list[str]:
-    """Return canonical detail URLs from an ACL volume or ACM session page."""
+    """Return canonical detail URLs from a supported proceedings page."""
     soup = BeautifulSoup(html, "lxml")
     parsed_page = urlparse(page_url)
     if parsed_page.hostname == ACM_DOMAIN:
@@ -225,6 +263,24 @@ def discover_papers(html: str, page_url: str) -> list[str]:
                 )
             except ValueError:
                 continue
+        return list(papers)
+    if parsed_page.hostname == ICLR_DOMAIN:
+        collection = ICLR_COLLECTION_PATH_RE.fullmatch(parsed_page.path)
+        if not collection:
+            return []
+        expected_year = collection.group("year")
+        papers: dict[str, None] = {}
+        for link in soup.select('a[href*="-Abstract-Conference.html"]'):
+            absolute = urljoin(page_url, str(link.get("href", "")).strip())
+            parsed = urlparse(absolute)
+            match = ICLR_PAPER_PATH_RE.fullmatch(parsed.path)
+            if (
+                parsed.hostname != ICLR_DOMAIN
+                or not match
+                or match.group("year") != expected_year
+            ):
+                continue
+            papers.setdefault(canonical_paper_url(absolute), None)
         return list(papers)
     papers: dict[str, None] = {}
     for link in soup.select("a[href]"):
@@ -537,6 +593,94 @@ def _extract_acm_paper(
     )
 
 
+def _iclr_author_name(value: str) -> str:
+    """Convert citation metadata's ``Family, Given`` form for display."""
+    parts = [_clean_text(part) for part in value.split(",", 1)]
+    if len(parts) == 2 and all(parts):
+        return f"{parts[1]} {parts[0]}"
+    return _clean_text(value)
+
+
+def _extract_iclr_abstract(soup: BeautifulSoup) -> str:
+    for section in soup.select("section.paper-section, section"):
+        heading = section.find(["h2", "h3", "h4", "h5", "h6"])
+        if not heading or _text(heading).casefold() != "abstract":
+            continue
+        for paragraph in heading.find_all_next("p"):
+            if section not in paragraph.parents:
+                break
+            abstract = _text(paragraph)
+            if abstract:
+                return abstract
+    return _text(soup.select_one(".paper-abstract"))
+
+
+def _extract_iclr_paper(
+    soup: BeautifulSoup,
+    page_url: str,
+    log: Callable[[str], None] | None,
+) -> Paper:
+    canonical_url = canonical_paper_url(page_url)
+    expected = ICLR_PAPER_PATH_RE.fullmatch(urlparse(canonical_url).path)
+    if not expected:
+        raise ValueError("不是有效的 ICLR Proceedings 论文详情页")
+
+    citation_title = soup.select_one('meta[name="citation_title"]')
+    citation_pdf = soup.select_one('meta[name="citation_pdf_url"]')
+    if not citation_title or not citation_pdf:
+        raise ValueError("页面缺少 ICLR Proceedings 论文元数据")
+    title = _clean_text(str(citation_title.get("content", "")))
+    pdf_url = urljoin(canonical_url, str(citation_pdf.get("content", "")))
+    pdf_parsed = urlparse(pdf_url)
+    actual_pdf = ICLR_PDF_PATH_RE.fullmatch(pdf_parsed.path)
+    if (
+        not title
+        or pdf_parsed.hostname != ICLR_DOMAIN
+        or not actual_pdf
+        or actual_pdf.group("year") != expected.group("year")
+        or actual_pdf.group("paper_hash").casefold()
+        != expected.group("paper_hash").casefold()
+    ):
+        raise ValueError("ICLR 论文 PDF 链接与详情页标识不一致")
+
+    authors: list[str] = []
+    for node in soup.select('meta[name="citation_author"]'):
+        name = _iclr_author_name(str(node.get("content", "")))
+        if name and name not in authors:
+            authors.append(name)
+    abstract = _extract_iclr_abstract(soup)
+    paper = _translated_paper(
+        title,
+        abstract,
+        pdf_url,
+        canonical_url,
+        authors,
+        "ICLR 专用解析",
+        log,
+    )
+    venue = _text(
+        soup.select_one(
+            f'.paper-meta a[href="/paper_files/paper/{expected.group("year")}"]'
+        )
+    )
+    if not venue:
+        journal = soup.select_one('meta[name="citation_journal_title"]')
+        journal_name = _clean_text(str(journal.get("content", ""))) if journal else ""
+        venue = (
+            f"{journal_name} {expected.group('year')} (ICLR {expected.group('year')})"
+            if journal_name
+            else f"ICLR {expected.group('year')}"
+        )
+    publication = soup.select_one('meta[name="citation_publication_date"]')
+    paper.source = "ICLR Proceedings"
+    paper.venue = venue
+    paper.decision = _text(soup.select_one(".paper-track"))
+    paper.published_at = (
+        _clean_text(str(publication.get("content", ""))) if publication else ""
+    )
+    return paper
+
+
 def _extract_abstract(soup: BeautifulSoup) -> str:
     """Extract text after an Abstract label from ACL's abstract card."""
     heading_names = ["strong", "h2", "h3", "h4", "h5", "h6"]
@@ -567,8 +711,11 @@ def extract_paper(
     log: Callable[[str], None] | None = None,
 ) -> Paper:
     soup = BeautifulSoup(html, "lxml")
-    if urlparse(page_url).hostname == ACM_DOMAIN:
+    hostname = urlparse(page_url).hostname
+    if hostname == ACM_DOMAIN:
         return _extract_acm_paper(soup, page_url, log)
+    if hostname == ICLR_DOMAIN:
+        return _extract_iclr_paper(soup, page_url, log)
     canonical_url = canonical_paper_url(page_url)
     identity = soup.select_one('meta[property="og:url"]')
     if identity and identity.get("content"):
@@ -624,7 +771,11 @@ def extract_paper(
 
 
 def make_fetcher(output_dir: Path) -> Fetcher:
-    return Fetcher(RequestConfig(), [ACL_DOMAIN, ACM_DOMAIN], output_dir / "cache")
+    return Fetcher(
+        RequestConfig(),
+        [ACL_DOMAIN, ACM_DOMAIN, ICLR_DOMAIN],
+        output_dir / "cache",
+    )
 
 
 def write_csv(destination: Path, papers: list[dict[str, object]]) -> Path:

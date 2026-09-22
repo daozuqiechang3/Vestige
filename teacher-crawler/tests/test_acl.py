@@ -135,6 +135,121 @@ def test_acm_normalizes_session_and_paper_urls() -> None:
         )
 
 
+def test_iclr_normalizes_collection_and_paper_urls() -> None:
+    collection = "https://proceedings.iclr.cc/paper_files/paper/2026"
+    paper = (
+        "https://proceedings.iclr.cc/paper_files/paper/2026/hash/"
+        "0021c2cb1b9b6a71ac478ea52a93b25a-Abstract-Conference.html"
+    )
+
+    assert validate_volume_url(collection + "/?source=test#papers") == collection
+    assert validate_volume_url(paper + "?source=test#abstract") == paper
+    assert canonical_paper_url(paper + "?source=test") == paper
+    assert paper_id_from_url(paper) == (
+        "iclr_2026_0021c2cb1b9b6a71ac478ea52a93b25a"
+    )
+    assert is_paper_url(paper)
+    assert not is_paper_url(collection)
+    with pytest.raises(ValueError, match="论文模式只接受"):
+        validate_volume_url("https://proceedings.iclr.cc/paper_files/paper/2026/search")
+
+
+def test_iclr_discovers_only_same_year_detail_pages_and_deduplicates() -> None:
+    first = (
+        "https://proceedings.iclr.cc/paper_files/paper/2026/hash/"
+        "0021c2cb1b9b6a71ac478ea52a93b25a-Abstract-Conference.html"
+    )
+    second = (
+        "https://proceedings.iclr.cc/paper_files/paper/2026/hash/"
+        "ffffd32092164225bb302d438cacbc61-Abstract-Conference.html"
+    )
+    html = f"""
+    <a href="{first}?source=list">First</a>
+    <a href="{first}#duplicate">Duplicate</a>
+    <a href="/paper_files/paper/2026/hash/ffffd32092164225bb302d438cacbc61-Abstract-Conference.html">Second</a>
+    <a href="/paper_files/paper/2025/hash/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-Abstract-Conference.html">Wrong year</a>
+    <a href="https://outside.example/hash/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-Abstract-Conference.html">Wrong host</a>
+    <a href="/paper_files/paper/2026/file/0021c2cb1b9b6a71ac478ea52a93b25a-Paper-Conference.pdf">PDF</a>
+    """
+
+    assert discover_papers(
+        html, "https://proceedings.iclr.cc/paper_files/paper/2026"
+    ) == [first, second]
+
+
+def test_iclr_extracts_example_metadata_and_full_abstract(monkeypatch) -> None:
+    monkeypatch.setattr("crawler.acl.translate_text", lambda text: f"翻译:{text}")
+    monkeypatch.setattr("crawler.acl.translate_abstract", lambda text: f"翻译:{text}")
+    url = (
+        "https://proceedings.iclr.cc/paper_files/paper/2026/hash/"
+        "0021c2cb1b9b6a71ac478ea52a93b25a-Abstract-Conference.html"
+    )
+    title = "MAGREF: Masked Guidance for Any-Reference Video Generation with Subject Disentanglement"
+    abstract = (
+        "We tackle the task of any-reference video generation, which aims to "
+        "synthesize videos conditioned on arbitrary types and combinations of "
+        "reference subjects, together with textual prompts."
+    )
+    citation_authors = [
+        "Deng, Yufan", "Yin, Yuanyang", "Guo, Xun", "Wang, Yizhi",
+        "Fang, Zhiyuan", "Yuan, Shenghai", "Yang, Yiding", "Wang, Angtian",
+        "Liu, Bo", "Huang, Haibin", "Ma, Chongyang",
+    ]
+    author_meta = "".join(
+        f'<meta name="citation_author" content="{author}">' for author in citation_authors
+    )
+    html = f"""
+    <meta name="citation_title" content="{title}">
+    {author_meta}
+    <meta name="citation_journal_title" content="International Conference on Learning Representations">
+    <meta name="citation_publication_date" content="2026-04-20">
+    <meta name="citation_pdf_url" content="https://proceedings.iclr.cc/paper_files/paper/2026/file/0021c2cb1b9b6a71ac478ea52a93b25a-Paper-Conference.pdf">
+    <header class="paper-header"><p class="paper-meta">
+      <a href="/paper_files/paper/2026">International Conference on Learning Representations 2026  (ICLR 2026)</a>
+      <span class="paper-track">Conference</span>
+    </p></header>
+    <section class="paper-section"><h2>Abstract</h2>
+      <p class="paper-abstract"></p><p>{abstract}</p><p></p>
+    </section>
+    """
+
+    paper = extract_paper(html, url)
+
+    assert paper.title == title
+    assert paper.authors == [
+        "Yufan Deng", "Yuanyang Yin", "Xun Guo", "Yizhi Wang",
+        "Zhiyuan Fang", "Shenghai Yuan", "Yiding Yang", "Angtian Wang",
+        "Bo Liu", "Haibin Huang", "Chongyang Ma",
+    ]
+    assert paper.abstract_en == abstract
+    assert paper.abstract_zh == f"翻译:{abstract}"
+    assert paper.pdf_url.endswith(
+        "/0021c2cb1b9b6a71ac478ea52a93b25a-Paper-Conference.pdf"
+    )
+    assert paper.source == "ICLR Proceedings"
+    assert paper.venue == (
+        "International Conference on Learning Representations 2026 (ICLR 2026)"
+    )
+    assert paper.decision == "Conference"
+    assert paper.published_at == "2026-04-20"
+    assert paper.parser_mode == "ICLR 专用解析"
+
+
+def test_iclr_rejects_mismatched_pdf_identity(monkeypatch) -> None:
+    monkeypatch.setattr("crawler.acl.translate_text", lambda text: text)
+    url = (
+        "https://proceedings.iclr.cc/paper_files/paper/2026/hash/"
+        "0021c2cb1b9b6a71ac478ea52a93b25a-Abstract-Conference.html"
+    )
+    html = """
+    <meta name="citation_title" content="Wrong paper">
+    <meta name="citation_pdf_url" content="https://proceedings.iclr.cc/paper_files/paper/2026/file/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-Paper-Conference.pdf">
+    """
+
+    with pytest.raises(ValueError, match="PDF 链接与详情页标识不一致"):
+        extract_paper(html, url)
+
+
 def test_acm_discovers_only_papers_in_selected_session() -> None:
     html = """
     <div class="toc__section">

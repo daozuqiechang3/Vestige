@@ -374,11 +374,10 @@ class TaskManager:
             mode = "openreview"
         if mode == "acl":
             url = validate_volume_url(url)
-            source = (
-                "ACM Digital Library"
-                if urlparse(url).hostname == "dl.acm.org"
-                else "ACL Anthology"
-            )
+            source = {
+                "dl.acm.org": "ACM Digital Library",
+                "proceedings.iclr.cc": "ICLR Proceedings",
+            }.get(urlparse(url).hostname or "", "ACL Anthology")
             school = college = source
         elif mode == "openreview":
             if is_openreview_forum_url(url):
@@ -809,7 +808,7 @@ class TaskManager:
                     else discover_papers(volume.text, volume.url)
                 )
                 if not urls:
-                    raise ValueError("合集页面没有发现可采集的 ACL 论文")
+                    raise ValueError("合集页面没有发现可采集的 ACL、ACM 或 ICLR 论文")
                 with self.lock:
                     task = self.tasks[task_id]
                     task.paper_urls = urls

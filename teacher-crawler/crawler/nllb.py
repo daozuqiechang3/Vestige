@@ -97,6 +97,7 @@ class NllbTranslator:
         self._tokenizer: Any = None
         self._torch: Any = None
         self._device = ""
+        self._load_error = ""
 
     @property
     def device(self) -> str:
@@ -105,45 +106,57 @@ class NllbTranslator:
     def _load(self) -> None:
         if self._model is not None:
             return
+        if self._load_error:
+            raise RuntimeError(self._load_error)
         with self._load_lock:
             if self._model is not None:
                 return
+            if self._load_error:
+                raise RuntimeError(self._load_error)
             try:
-                import torch
-                from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-            except ImportError as exc:
-                raise RuntimeError(
-                    "本地 NLLB 依赖未安装，请重新安装项目依赖"
-                ) from exc
+                self._initialize_model()
+            except Exception as exc:
+                self._load_error = (
+                    "本地 NLLB 初始化失败，当前任务后续翻译将直接降级："
+                    f"{type(exc).__name__}: {exc}"
+                )
+                raise RuntimeError(self._load_error) from exc
 
-            if self.device_setting not in {"auto", "cpu", "cuda"}:
-                raise ValueError("ACL_NLLB_DEVICE 只能是 auto、cpu 或 cuda")
-            if self.device_setting == "cuda" and not torch.cuda.is_available():
-                raise RuntimeError("已指定 CUDA，但当前 PyTorch 无法访问显卡")
-            device = (
-                "cuda"
-                if self.device_setting == "cuda"
-                or (self.device_setting == "auto" and torch.cuda.is_available())
-                else "cpu"
-            )
-            dtype = torch.float16 if device == "cuda" else torch.float32
-            self.model_dir.mkdir(parents=True, exist_ok=True)
-            tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name,
-                src_lang=SOURCE_LANGUAGE,
-                cache_dir=self.model_dir,
-            )
-            model = AutoModelForSeq2SeqLM.from_pretrained(
-                self.model_name,
-                cache_dir=self.model_dir,
-                torch_dtype=dtype,
-            )
-            model.to(device)
-            model.eval()
-            self._torch = torch
-            self._tokenizer = tokenizer
-            self._model = model
-            self._device = device
+    def _initialize_model(self) -> None:
+        try:
+            import torch
+            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+        except ImportError as exc:
+            raise RuntimeError("本地 NLLB 依赖未安装，请重新安装项目依赖") from exc
+
+        if self.device_setting not in {"auto", "cpu", "cuda"}:
+            raise ValueError("ACL_NLLB_DEVICE 只能是 auto、cpu 或 cuda")
+        if self.device_setting == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("已指定 CUDA，但当前 PyTorch 无法访问显卡")
+        device = (
+            "cuda"
+            if self.device_setting == "cuda"
+            or (self.device_setting == "auto" and torch.cuda.is_available())
+            else "cpu"
+        )
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.model_name,
+            src_lang=SOURCE_LANGUAGE,
+            cache_dir=self.model_dir,
+        )
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            self.model_name,
+            cache_dir=self.model_dir,
+            torch_dtype=dtype,
+        )
+        model.to(device)
+        model.eval()
+        self._torch = torch
+        self._tokenizer = tokenizer
+        self._model = model
+        self._device = device
 
     def _generate(self, texts: list[str]) -> list[str]:
         self._load()

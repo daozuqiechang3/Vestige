@@ -54,6 +54,8 @@ py -m crawler.web
 
 ACL 模式接受 Anthology 文集卷页面或单篇论文页面。文集页会先发现全部论文，因此“发现”表示文集总量；“成功论文上限”只限制成功记录数。达到上限且仍有待处理论文时，任务进入暂停状态，可以提高上限后继续。页面同时显示目标进度、合集覆盖率、当前失败数、待采集数和翻译告警数。
 
+同一模式也支持 ICLR Proceedings 合集页和论文详情页，例如 `https://proceedings.iclr.cc/paper_files/paper/2026`。合集发现只接受同年份的 `-Abstract-Conference.html` 详情链接；详情解析会读取标题、作者、完整摘要、会议、类型、发布日期和 PDF，并校验详情 URL 与 PDF 中的年份和论文哈希一致。
+
 论文模式也接受 ACM Digital Library proceedings 的具体 SESSION 链接（必须带 `#headingN`，例如 `#heading2`）和单篇 DOI 页面。工具会把 fragment 转换成 ACM 实际使用的 `tocHeading` 参数，并读取该标题之后、下一个 SESSION 标题之前的全部论文。ACM 对普通 HTTP 客户端可能返回 403；出现该提示时需要先通过浏览器获取页面，不能通过提高重试次数绕过站点验证。
 
 OpenReview 模式接受带明确 tab 的 group URL（例如 ICML 2026 `#tab-accept-spotlight`）以及单篇 `/forum?id=...` URL。分组发现同时限定 `venue`、`invitation` 和 `domain`，不会把 regular 或 reject 论文混入 spotlight。采集字段包括标题、作者与主页、Published/Last Modified、venue、decision、TL;DR、Abstract、Lay Summary、Primary Area、Keywords、PDF、Originally Submitted PDF、Submission Number 和官方 Paper Decision 的 Comment。
